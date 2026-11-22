@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         Toppzy Bazaar Manager (demo)
+// @name         Toppzy Manager
 // @namespace    toppzy.torn
-// @version      0.2.1
-// @description  Floating button on every Torn page. Shows your bazaar, inventory, lowest Item Market and bazaar prices, suggests prices, remembers sold-out items (0 left) for refills, and fills the Add/Manage pages. Never saves by itself.
+// @version      0.3.0
+// @description  Bazaar manager for Torn: overview of everything in your bazaar (also sold-out items), price suggestions from Item Market + bazaars, plan changes anywhere (even while flying) and apply them in Torn with one click. Only fills fields – you always press Save / Add yourself.
 // @author       Toppzy [4422625]
 // @match        https://www.torn.com/*
 // @match        https://torn.com/*
@@ -20,56 +20,100 @@
 (function () {
   'use strict';
   if (window.top !== window.self) return;
+  const VERSION = '0.3.0';
 
-  /* ---------- Default settings (all editable in the Settings tab) ---------- */
-  const DEF = {
-    // Price
-    priceSource: 'lowestBoth', // lowestIM | lowestBazaar | lowestBoth | avgBazaar | market
-    priceDelta: '-1',          // "-1", "+0", "-1%", "+5%"
-    skipLowest: 0,             // ignore the N cheapest listings (outliers / 1-item dumps)
-    minPctOfMV: 70,            // never suggest below X % of market value (0 = off)
-    // Add items page
-    addMode: 'tracked',        // refill | tracked | all
-    qtyMode: 'all',            // all | leave
-    leaveQty: 1,               // used when qtyMode = leave
-    exclude: 'Xanax, Blood Bag, Erotic DVD, Small First Aid Kit',
-    // Manage page
-    manageMode: 'all',         // all | undercut
-    // Fill / API
-    refreshBeforeFill: true,   // fetch fresh prices (older than cacheMin) before filling
-    tornPerMin: 40,            // max Torn API calls per minute from this script
-    cacheMin: 10,              // minutes a price is reused
-    useWeav3r: true            // lowest bazaar prices from weav3r.dev (your key is never sent there)
+  /* =====================================================================
+   *  SETTINGS
+   * ===================================================================*/
+  const PRESETS = {
+    fast:     { priceSource: 'lowestBoth', priceDelta: '-1', skipLowest: 0, minPctOfMV: 70 },
+    balanced: { priceSource: 'lowestBoth', priceDelta: '-1', skipLowest: 1, minPctOfMV: 90 },
+    profit:   { priceSource: 'market',     priceDelta: '-1', skipLowest: 0, minPctOfMV: 0 }
   };
+  const DEF = Object.assign({
+    preset: 'balanced',
+    addWhich: 'listed',     // listed | empty | inventory
+    qtyMode: 'all',         // all | leave | pct
+    leaveQty: 1,
+    pctQty: 50,
+    neverSell: [],
+    manageMode: 'all',      // all | undercut
+    autoCheckMin: 15,       // 0 = off
+    cacheMin: 10,
+    tornPerMin: 40,
+    useWeav3r: true,
+    guardPct: 1             // price guard: warn if market moved more than this %
+  }, PRESETS.balanced);
+  const SRC = {
+    lowestBoth: 'Cheapest seller anywhere (Item Market or bazaar)',
+    lowestIM: 'Cheapest on the Item Market',
+    lowestBazaar: 'Cheapest in bazaars',
+    avgBazaar: 'Average bazaar price',
+    market: 'Normal market price (market value)'
+  };
+  const UNIQUE_TYPES = ['Primary', 'Secondary', 'Melee', 'Defensive'];
+  const ALL_CATS = ['Collectible', 'Clothing', 'Other', 'Tool', 'Melee', 'Defensive', 'Material', 'Car', 'Primary', 'Secondary', 'Book', 'Special', 'Supply Pack', 'Temporary', 'Enhancer', 'Artifact', 'Flower', 'Booster', 'Medical', 'Candy', 'Jewelry', 'Alcohol', 'Plushie', 'Drug', 'Energy Drink'];
 
-  /* ---------- Storage ---------- */
+  /* =====================================================================
+   *  STORAGE
+   * ===================================================================*/
   const hasGM = typeof GM_getValue === 'function';
   const load = (k, d) => { try { const v = hasGM ? GM_getValue(k) : localStorage.getItem('tbm_' + k); return v == null ? d : (typeof v === 'string' ? JSON.parse(v) : v); } catch (e) { return d; } };
   const save = (k, v) => { try { hasGM ? GM_setValue(k, JSON.stringify(v)) : localStorage.setItem('tbm_' + k, JSON.stringify(v)); } catch (e) { } };
 
   let cfg = Object.assign({}, DEF, load('cfg', {}));
+  if (!Array.isArray(cfg.neverSell)) cfg.neverSell = [];
+  if ('exclude' in cfg) { delete cfg.exclude; delete cfg.strategy; cfg.preset = 'balanced'; Object.assign(cfg, PRESETS.balanced); save('cfg', cfg); } // 0.2 → 0.3
   let key = load('key', '');
   let me = load('me', 0);
-  let tracked = load('tracked', {});   // { id: { id, name, type, bzQty, bzPrice, inv, floor, soldOutAt } }
-  let priceCache = load('prices', {}); // { id: { t, imList:[], bzList:[], bzAvg, mv } }
+  let items = load('items', null);
+  if (!items) {                                   // migrate 0.2 "tracked"
+    items = {};
+    const old = load('tracked', {});
+    for (const id in old) { const t = old[id]; items[id] = { id, name: t.name, type: t.type, bzQty: t.bzQty || 0, bzPrice: t.bzPrice || 0, inv: t.inv || 0, soldOutAt: t.soldOutAt || 0, floor: t.floor > 0 ? t.floor : null, custom: null, plan: {} }; }
+  }
+  let prices = load('prices', {});        // id -> {t, imList, bzList, bzAvg, mv, bzOk}
+  let abroad = load('abroad', {});        // id -> {cost, t}
+  let bazaar = load('bazaar', { open: null, t: 0 });
+  let planBazaar = load('planBazaar', null);   // 'open' | 'close' | null
+  let flow = load('flow', null);              // {steps:[...], i}
   let lastRun = load('lastRun', 0);
+  const persist = () => { save('items', items); save('prices', prices); save('bazaar', bazaar); save('planBazaar', planBazaar); save('lastRun', lastRun); };
 
-  /* ---------- Helpers ---------- */
+  /* =====================================================================
+   *  HELPERS
+   * ===================================================================*/
   const fmt = n => n ? '$' + Math.round(n).toLocaleString('en-US') : '–';
   const esc = s => String(s == null ? '' : s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
   const sleep = ms => new Promise(r => setTimeout(r, ms));
-  const ago = t => { if (!t) return 'never'; const m = Math.round((Date.now() - t) / 60000); return m < 1 ? 'just now' : m < 60 ? m + ' min ago' : Math.round(m / 60) + ' h ago'; };
-  const excluded = name => cfg.exclude.split(',').map(s => s.trim().toLowerCase()).filter(Boolean).includes(String(name || '').toLowerCase());
+  const ago = t => { if (!t) return 'never'; const m = Math.round((Date.now() - t) / 60000); return m < 1 ? 'just now' : m < 60 ? m + ' min ago' : m < 1440 ? Math.round(m / 60) + ' h ago' : Math.round(m / 1440) + ' d ago'; };
+  const num = v => +String(v == null ? '' : v).replace(/[^0-9.]/g, '') || 0;
+  const minPos = arr => { const a = arr.filter(x => x > 0); return a.length ? Math.min(...a) : 0; };
+  const nth = (list, n) => (list && list.length) ? list[Math.min(n, list.length - 1)] : 0;
+  const isNever = name => cfg.neverSell.some(n => n.toLowerCase() === String(name || '').toLowerCase());
+  const isUnique = it => UNIQUE_TYPES.includes(it.type) || !!it.unique;
 
+  /* =====================================================================
+   *  API
+   * ===================================================================*/
+  const ERR = {
+    1: 'the key is empty', 2: 'the API key is wrong', 5: 'too many API calls – wait a minute',
+    7: 'your key level is too low (use a Limited key)', 8: 'your IP is temporarily blocked by Torn',
+    9: 'the Torn API is down', 10: 'the key owner is in federal jail', 13: 'the key is paused (inactive owner)',
+    16: 'your key level is too low (use a Limited key)', 17: 'Torn backend error – try again'
+  };
   let lastTorn = 0;
-  async function torn(path) {
+  async function torn(path, label) {
     const gap = 60000 / Math.max(5, +cfg.tornPerMin || 40);
     const wait = lastTorn + gap - Date.now();
     if (wait > 0) await sleep(wait);
     lastTorn = Date.now();
-    const r = await fetch(`https://api.torn.com/v2/${path}${path.includes('?') ? '&' : '?'}key=${key}&comment=ToppzyBazaar`);
-    const j = await r.json();
-    if (j.error) { const e = new Error(j.error.error); e.code = j.error.code; throw e; }
+    let j;
+    try {
+      const r = await fetch(`https://api.torn.com/v2/${path}${path.includes('?') ? '&' : '?'}key=${key}&comment=ToppzyManager`);
+      j = await r.json();
+    } catch (e) { const er = new Error(`${label}: could not reach Torn (network)`); er.code = -1; throw er; }
+    if (j.error) { const e = new Error(`${label}: ${ERR[j.error.code] || j.error.error}`); e.code = j.error.code; throw e; }
     return j;
   }
   function weav3r(id) {
@@ -81,73 +125,79 @@
     return fetch(url).then(r => r.json());
   }
 
-  /* ---------- Data ---------- */
   async function ensureMe() {
     if (me) return me;
-    const j = await torn('user/basic');
+    const j = await torn('user/basic', 'Your profile');
     me = (j.profile || j).id || 0; save('me', me);
     return me;
   }
-
   async function fetchBazaar() {
-    const j = await torn('user/bazaar');
-    const items = (j.bazaar && j.bazaar.items) || [];
+    const j = await torn('user/bazaar', 'Your bazaar');
+    const b = j.bazaar || {};
+    bazaar = { open: b.exists === false ? null : !!b.is_open, t: Date.now() };
+    if (planBazaar && ((planBazaar === 'open') === bazaar.open)) planBazaar = null;   // plan done
     const seen = new Set();
-    for (const it of items) {
+    for (const it of b.items || []) {
       const id = String(it.id); seen.add(id);
       const price = it.price || (it.uids && it.uids[0] && it.uids[0].price) || 0;
-      const t = tracked[id] || (tracked[id] = { id, floor: 0 });
-      Object.assign(t, { name: it.name, type: it.type, bzQty: it.quantity, bzPrice: price, soldOutAt: 0 });
+      const t = items[id] || (items[id] = { id, floor: null, custom: null, plan: {} });
+      Object.assign(t, { name: it.name, type: it.type, bzQty: it.quantity, bzPrice: price, unique: !!(it.uids && it.uids.length), soldOutAt: 0 });
+      t.plan = t.plan || {};
+      if (t.plan.price && t.plan.price === price) { delete t.plan.price; delete t.plan.priceRef; delete t.plan.locked; }
     }
-    // Items no longer in the bazaar stay in the list with 0 (for refills)
-    for (const id in tracked) if (!seen.has(id) && tracked[id].bzQty !== 0) { tracked[id].bzQty = 0; tracked[id].soldOutAt = Date.now(); }
+    for (const id in items) {
+      const t = items[id];
+      if (seen.has(id)) continue;
+      if (t.plan && t.plan.remove) { delete items[id]; continue; }    // removal confirmed by API
+      if (t.bzQty !== 0) { t.bzQty = 0; t.soldOutAt = Date.now(); }
+    }
   }
-
   async function fetchInventory(cats) {
     const inv = {};
     for (const c of cats) {
       try {
-        const j = await torn(`user/inventory?cat=${encodeURIComponent(c)}&limit=250`);
+        const j = await torn(`user/inventory?cat=${encodeURIComponent(c)}&limit=250`, 'Your inventory');
         for (const it of (j.inventory && j.inventory.items) || []) {
           if (it.equipped || it.faction_owned) continue;
           const id = String(it.id);
           inv[id] = inv[id] || { id, name: it.name, type: c, amount: 0 };
           inv[id].amount += it.amount;
         }
-      } catch (e) { if (e.code === 2) throw e; }
+      } catch (e) { if ([2, 7, 16].includes(e.code)) throw e; }
     }
     return inv;
   }
-
   async function fetchPrice(id, force) {
-    const c = priceCache[id];
+    const c = prices[id];
     if (!force && c && Date.now() - c.t < cfg.cacheMin * 60000) return c;
-    const p = { t: Date.now(), imList: [], bzList: [], bzAvg: 0, mv: 0 };
+    const p = { t: Date.now(), imList: [], bzList: [], bzAvg: 0, mv: 0, bzOk: false };
     try {
-      const j = await torn(`market/${id}/itemmarket?limit=20`);
+      const j = await torn(`market/${id}/itemmarket?limit=20`, 'Item Market prices');
       const m = j.itemmarket || {};
       p.imList = (m.listings || []).filter(x => x.price > 0).map(x => x.price).sort((a, b) => a - b).slice(0, 10);
       p.mv = +(m.item && m.item.average_price) || 0;
-    } catch (e) { if (e.code === 2) throw e; }
+    } catch (e) { if ([2, 7, 16].includes(e.code)) throw e; }
     if (cfg.useWeav3r) {
       try {
         const w = await weav3r(id);
         p.bzList = (w.listings || []).filter(x => x.price > 0 && String(x.player_id) !== String(me)).map(x => x.price).sort((a, b) => a - b).slice(0, 10);
         p.bzAvg = +w.bazaar_average || 0;
         if (!p.mv && w.market_price) p.mv = +w.market_price;
+        p.bzOk = true;
       } catch (e) { }
     }
-    priceCache[id] = p;
+    prices[id] = p;
     return p;
   }
 
-  /* ---------- Pricing ---------- */
-  const minPos = arr => { const a = arr.filter(x => x > 0); return a.length ? Math.min(...a) : 0; };
-  const nth = (list, n) => (list && list.length) ? list[Math.min(n, list.length - 1)] : 0;
-  function basePrice(p) {
-    const n = +cfg.skipLowest || 0;
+  /* =====================================================================
+   *  PRICING
+   * ===================================================================*/
+  const strategyOf = it => (it && it.custom) ? it.custom : cfg;
+  function basePrice(p, s) {
+    const n = +s.skipLowest || 0;
     const im = nth(p.imList, n), bz = nth(p.bzList, n);
-    switch (cfg.priceSource) {
+    switch (s.priceSource) {
       case 'lowestIM': return im || bz;
       case 'lowestBazaar': return bz || im;
       case 'avgBazaar': return p.bzAvg || p.mv;
@@ -155,310 +205,755 @@
       default: return minPos([im, bz]);
     }
   }
-  function applyDelta(v) {
-    const m = String(cfg.priceDelta).replace(/\s/g, '').match(/^([+-]?\d+(?:\.\d+)?)(%?)$/);
+  function applyDelta(v, d) {
+    const m = String(d).replace(/\s|\$/g, '').match(/^([+-]?\d+(?:\.\d+)?)(%?)$/);
     if (!m || !v) return v;
     return m[2] ? v * (1 + (+m[1]) / 100) : v + (+m[1]);
   }
-  function suggest(t, p) {
-    if (!p) return 0;
-    let s = Math.round(applyDelta(basePrice(p)));
-    if (+cfg.minPctOfMV && p.mv && s < p.mv * cfg.minPctOfMV / 100) s = Math.round(p.mv * cfg.minPctOfMV / 100);
-    if (t && t.floor && s < t.floor) s = t.floor;
-    return s > 0 ? s : 0;
+  function floorOf(it) {
+    if (!it) return 0;
+    if (it.floor === 0) return 0;                       // explicitly off
+    if (it.floor > 0) return it.floor;                  // manual
+    return (abroad[it.id] && abroad[it.id].cost) || 0;  // auto from abroad shop
   }
-  const lowestOther = p => minPos([nth(p.imList, 0), nth(p.bzList, 0)]);
-  function status(t, p) {
-    p = p || {};
-    if (!t.bzQty) return t.inv > 0 ? { k: 'refill', txt: `Sold out · ${t.inv} in inv – refill`, col: '#3d85c6' } : { k: 'empty', txt: 'Sold out · 0 in inv', col: '#777' };
+  function suggest(it, p) {
+    if (!p || isUnique(it)) return 0;
+    const s = strategyOf(it);
+    let v = Math.round(applyDelta(basePrice(p, s), s.priceDelta));
+    if (+s.minPctOfMV && p.mv && v < p.mv * s.minPctOfMV / 100) v = Math.round(p.mv * s.minPctOfMV / 100);
+    const f = floorOf(it);
+    if (f && v < f) v = f;
+    return v > 0 ? v : 0;
+  }
+  const lowestOther = p => p ? minPos([nth(p.imList, 0), nth(p.bzList, 0)]) : 0;
+  function status(it) {
+    const p = prices[it.id];
+    if (!it.bzQty) return { k: 'sold', txt: 'Sold out' + (it.inv > 0 ? ` · ${it.inv} in inv` : '') + (it.soldOutAt ? ` · ${ago(it.soldOutAt)}` : ''), col: '#3d85c6' };
+    if (isUnique(it)) return { k: 'ok', txt: 'Manual price', col: '#999' };
     const lo = lowestOther(p);
-    if (lo && t.bzPrice > lo) return { k: 'under', txt: 'Undercut', col: '#e6b800' };
-    return { k: 'ok', txt: 'Lowest', col: '#6aa84f' };
+    if (lo && it.bzPrice > lo) return { k: 'under', txt: 'Undercut', col: '#e6b800' };
+    if (lo) return { k: 'ok', txt: 'Lowest', col: '#6aa84f' };
+    return { k: 'ok', txt: '–', col: '#555' };
   }
 
-  /* ---------- Refresh ---------- */
-  let busy = false, invAll = null;
-  const ALL_CATS = ['Collectible', 'Clothing', 'Other', 'Tool', 'Melee', 'Defensive', 'Material', 'Car', 'Primary', 'Secondary', 'Book', 'Special', 'Supply Pack', 'Temporary', 'Enhancer', 'Artifact', 'Flower', 'Booster', 'Medical', 'Candy', 'Jewelry', 'Alcohol', 'Plushie', 'Drug', 'Energy Drink'];
+  /* =====================================================================
+   *  PLAN
+   * ===================================================================*/
+  const P = it => (it.plan = it.plan || {});
+  function planCounts() {
+    let price = 0, qty = 0, rem = 0;
+    for (const id in items) { const p = items[id].plan || {}; if (p.price) price++; if (p.qty > 0) qty++; if (p.remove) rem++; }
+    return { price, qty, rem, bz: planBazaar ? 1 : 0, total: price + qty + rem + (planBazaar ? 1 : 0) };
+  }
+  function setPlanPrice(it, v, locked) {
+    const p = P(it);
+    if (!v) { delete p.price; delete p.locked; delete p.priceRef; return; }
+    p.price = Math.round(v); p.locked = !!locked; p.priceRef = lowestOther(prices[it.id]) || 0; p.t = Date.now();
+  }
+  function qtyFor(have, it) {
+    if (it && it.plan && it.plan.qty > 0) return Math.min(it.plan.qty, have || it.plan.qty);
+    if (cfg.qtyMode === 'leave') return have - (+cfg.leaveQty || 0);
+    if (cfg.qtyMode === 'pct') return Math.floor(have * (+cfg.pctQty || 0) / 100);
+    return have;
+  }
+  function fillScope() {
+    return Object.values(items).filter(it => !isNever(it.name) && !(it.plan && it.plan.remove) &&
+      (cfg.addWhich === 'empty' ? !it.bzQty : true));
+  }
 
+  /* =====================================================================
+   *  REFRESH
+   * ===================================================================*/
+  let busy = false, invAll = null;
   async function guard(fn) {
-    if (busy) return;
-    if (!key) { askKey(); return; }
-    busy = true;
+    if (busy) return false;
+    if (!key) { askKey(); return false; }
+    busy = true; let ok = true;
     try { await ensureMe(); await fn(); }
     catch (e) {
-      if (e.code === 2) { key = ''; save('key', ''); setStatus('Invalid API key.'); askKey(); }
-      else if (e.code === 5) setStatus('Too many API calls – wait a minute.');
-      else setStatus('Error: ' + e.message);
+      ok = false;
+      if (e.code === 2) { key = ''; save('key', ''); toast(e.message, true); askKey(); }
+      else toast(e.message, true);
     }
-    busy = false; save('tracked', tracked); save('prices', priceCache); render();
+    busy = false; persist(); render(); return ok;
   }
-
-  // Refresh = your bazaar + inventory + NEW Item Market and bazaar prices for every tracked item
   const refresh = (scanAll, force) => guard(async () => {
-    setStatus('Loading bazaar …');
+    setStatus('Loading your bazaar …');
     await fetchBazaar();
-    const cats = scanAll ? ALL_CATS : [...new Set(Object.values(tracked).map(t => t.type).filter(Boolean))];
+    const cats = scanAll ? ALL_CATS : [...new Set(Object.values(items).map(t => t.type).filter(Boolean))];
     setStatus(`Loading inventory (${cats.length} categories) …`);
     const inv = await fetchInventory(cats);
-    for (const id in tracked) tracked[id].inv = inv[id] ? inv[id].amount : 0;
+    for (const id in items) items[id].inv = inv[id] ? inv[id].amount : 0;
     if (scanAll) invAll = inv;
-    const ids = Object.keys(tracked); let i = 0;
+    const ids = Object.keys(items); let i = 0;
     for (const id of ids) { i++; setStatus(`Prices ${i}/${ids.length} …`); await fetchPrice(id, force); }
-    lastRun = Date.now(); save('lastRun', lastRun); setStatus('');
+    lastRun = Date.now(); save('lastAuto', Date.now()); setStatus('');
   });
+  async function autoCheck() {
+    if (!key || busy || !(+cfg.autoCheckMin)) return;
+    const last = load('lastAuto', 0);
+    if (Date.now() - last < cfg.autoCheckMin * 60000) return;
+    save('lastAuto', Date.now());
+    busy = true;
+    try {
+      await ensureMe(); await fetchBazaar();
+      const cats = [...new Set(Object.values(items).map(t => t.type).filter(Boolean))];
+      const inv = await fetchInventory(cats);
+      for (const id in items) items[id].inv = inv[id] ? inv[id].amount : 0;
+    } catch (e) { }
+    busy = false; persist(); render();
+  }
 
-  /* ---------- Filling Torn pages (never saves) ---------- */
+  /* =====================================================================
+   *  TORN PAGES – read & fill (never saves)
+   * ===================================================================*/
   const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
-  function fillInput(input, v) {
-    input.focus();
-    setter.call(input, String(Math.round(v)));
+  function setVal(input, v) {
+    if (!input) return;
+    setter.call(input, String(v));
     input.dispatchEvent(new Event('input', { bubbles: true }));
     input.dispatchEvent(new KeyboardEvent('keyup', { bubbles: true, key: '0' }));
     input.dispatchEvent(new Event('change', { bubbles: true }));
-    input.blur();
   }
-  const pageMode = () => /bazaar\.php/.test(location.href) ? (/#\/manage/.test(location.hash) ? 'manage' : /#\/add/.test(location.hash) ? 'add' : 'bazaar') : '';
-  const idOf = el => { const img = el.querySelector('img[src*="/images/items/"]'); return img ? (img.getAttribute('src').match(/items\/(\d+)\//) || [])[1] : null; };
+  function setMoney(container, v) {
+    const vis = container.querySelector('input.input-money:not([type=hidden])');
+    const hid = container.querySelector('input.input-money[type=hidden]');
+    if (vis) { vis.focus(); setVal(vis, Math.round(v)); vis.blur(); }
+    if (hid) setVal(hid, Math.round(v));
+  }
+  const pageMode = () => /bazaar\.php/.test(location.href) ? (/#\/manage/.test(location.hash) ? 'manage' : /#\/add/.test(location.hash) ? 'add' : /#\/personali[sz]e/.test(location.hash) ? 'personalize' : 'bazaar') : '';
+  const idFromImg = el => { const img = el && el.querySelector('img[src*="/images/items/"]'); return img ? (img.getAttribute('src').match(/items\/(\d+)\//) || [])[1] : null; };
+  const mark = (row, col) => { row.style.outline = '2px solid ' + col; row.style.outlineOffset = '-2px'; };
 
+  // ---- Manage page
   function manageRows() {
     return [...document.querySelectorAll('[data-testid^="item-"]')].map(row => {
-      const input = row.querySelector('[class*="price___"] input:not([type=hidden])');
-      const id = idOf(row);
-      return id && input ? { id, input, row, name: row.getAttribute('aria-label') || '' } : null;
+      const id = idFromImg(row);
+      const price = row.querySelector('[class*="price___"]');
+      const remove = row.querySelector('input[class*="removeAmountInput"], [class*="remove___"] input');
+      return id && price ? { id, price, remove, row } : null;
     }).filter(Boolean);
   }
-  // Add items page – BETA, selectors to be verified (step 2)
-  function addRows() {
-    return [...document.querySelectorAll('li')].map(li => {
-      const id = idOf(li); if (!id) return null;
-      const inputs = [...li.querySelectorAll('input:not([type=hidden]):not([type=checkbox])')];
-      if (!inputs.length) return null;
-      const qty = li.querySelector('.amount input:not([type=hidden]), [class*="amount"] input:not([type=hidden])');
-      const price = li.querySelector('.price input:not([type=hidden]), [class*="price"] input:not([type=hidden])') || inputs[inputs.length - 1];
-      const box = li.querySelector('input[type=checkbox]');
-      const name = (li.querySelector('.name-wrap, [class*="name"]') || {}).innerText || '';
-      const have = +((li.innerText.match(/x\s?([\d,]+)/) || [])[1] || '').replace(/,/g, '') || 0;
-      return { id, qty: qty !== price ? qty : null, price, box, row: li, name: name.trim(), have };
-    }).filter(Boolean);
-  }
-
-  // Fill = (fresh prices if older than cache) + fill price on Manage / quantity + price on Add
-  const fillPage = () => guard(async () => {
-    const mode = pageMode();
-    if (mode !== 'manage' && mode !== 'add') { setStatus('Open Bazaar → Manage or Add items first.'); return; }
-    const rows = mode === 'manage' ? manageRows() : addRows();
-    let pick = rows;
-    if (mode === 'add') {
-      pick = rows.filter(r => {
-        const t = tracked[r.id], name = (t && t.name) || r.name;
-        if (excluded(name)) return false;
-        if (cfg.addMode === 'refill') return t && !t.bzQty;
-        if (cfg.addMode === 'tracked') return !!t;
-        return true; // all inventory items shown on the Add page
-      });
-    }
-    if (cfg.refreshBeforeFill) {
-      let i = 0;
-      for (const r of pick) { i++; setStatus(`Prices ${i}/${pick.length} …`); await fetchPrice(r.id, false); }
-    }
-    let n = 0, skipped = 0;
-    for (const r of pick) {
-      const t = tracked[r.id] || { id: r.id, floor: 0 };
-      const p = priceCache[r.id];
-      if (mode === 'manage' && cfg.manageMode === 'undercut' && status(t, p).k !== 'under') continue;
-      const s = suggest(t, p);
-      if (!s) { skipped++; continue; }
-      if (mode === 'add') {
-        const have = (t.inv > 0 ? t.inv : 0) || r.have || 1;
-        const q = cfg.qtyMode === 'leave' ? have - (+cfg.leaveQty || 0) : have;
-        if (q <= 0) { skipped++; continue; }
-        if (r.qty) fillInput(r.qty, q);
-        else if (r.box && !r.box.checked) r.box.click();
+  // mode: 'plan' (prices + removals from the plan) | 'adjust' (suggested prices now)
+  function fillManage(mode) {
+    let n = 0, r = 0;
+    for (const x of manageRows()) {
+      const it = items[x.id]; if (!it) continue;
+      const pl = it.plan || {};
+      if (pl.remove && x.remove) { setVal(x.remove, it.bzQty || num((x.row.innerText.match(/x\s?([\d,]+)/) || [])[1]) || 1); mark(x.row, '#cc0000'); r++; continue; }
+      let v = 0;
+      if (mode === 'plan') v = pl.price || 0;
+      else {
+        if (pl.locked && pl.price) v = pl.price;
+        else if (isUnique(it)) v = 0;
+        else if (cfg.manageMode === 'undercut' && status(it).k !== 'under') v = 0;
+        else v = suggest(it, prices[it.id]);
       }
-      fillInput(mode === 'manage' ? r.input : r.price, s);
-      r.row.style.outline = '2px solid ' + (mode === 'manage' ? '#6aa84f' : '#3d85c6');
-      n++;
+      if (!v || v === it.bzPrice) continue;
+      setMoney(x.price, v); mark(x.row, '#6aa84f'); n++;
     }
-    setStatus(n ? `${n} items filled${skipped ? `, ${skipped} skipped` : ''} – press «${mode === 'manage' ? 'Save changes' : 'Add to bazaar'}» yourself.${mode === 'add' ? ' (BETA)' : ''}` : 'Nothing to fill with current settings.');
-  });
+    return { n, r };
+  }
 
-  /* ---------- UI ---------- */
+  // ---- Add items page (loads the "All" tab first – items only load when a tab is clicked)
+  async function addRows() {
+    const tabs = [...document.querySelectorAll('ul.ui-tabs-nav li a')];
+    const allTab = tabs.find(a => /^\s*all\s*$/i.test(a.getAttribute('title') || a.getAttribute('data-title') || a.textContent || '')) || tabs[0];
+    if (allTab && !/active/.test(allTab.closest('li').className)) allTab.click();
+    const rowsNow = () => [...document.querySelectorAll('ul.all-items li[data-group="child"]')].filter(li => idFromImg(li));
+    for (let i = 0; i < 40 && !rowsNow().length; i++) await sleep(250);
+    return rowsNow().map(li => {
+      const id = idFromImg(li);
+      const txt = li.innerText || '';
+      if (/Equipped|Untradable/i.test(txt)) return null;
+      const qty = li.querySelector('.amount input:not([type=hidden])');
+      const box = li.querySelector('input[type=checkbox]');
+      const hasPrice = !!li.querySelector('input.input-money');
+      const nameEl = li.querySelector('.name-wrap, .t-overflow');
+      const raw = (nameEl ? nameEl.innerText : txt.split('\n')[0]).trim();
+      const name = raw.replace(/\s*x[\d,]+\s*$/, '').trim();
+      const have = num((raw.match(/x\s?([\d,]+)\s*$/) || [])[1]) || 1;
+      return { id, li, qty, box, hasPrice, name, have };
+    }).filter(Boolean);
+  }
+  // mode: 'plan' (plan.qty items) | 'fill' (Fill up settings)
+  async function fillAdd(mode) {
+    const rows = await addRows();
+    let n = 0, skipped = 0;
+    for (const r of rows) {
+      const it = items[r.id] || { id: r.id, name: r.name, type: '', floor: null, plan: {} };
+      if (isNever(it.name || r.name)) continue;
+      let q;
+      if (mode === 'plan') { if (!(it.plan && it.plan.qty > 0)) continue; q = Math.min(it.plan.qty, r.have); }
+      else {
+        const tracked = !!items[r.id];
+        if (cfg.addWhich !== 'inventory' && !tracked) continue;
+        if (cfg.addWhich === 'empty' && it.bzQty) continue;
+        if (it.plan && it.plan.remove) continue;
+        q = qtyFor(r.have, it);
+      }
+      if (!(q > 0)) { skipped++; continue; }
+      // already for sale → keep the bazaar's current price (prices are changed with Adjust prices); new/empty → suggestion
+      const pr = (it.plan && it.plan.price) || (it.bzQty > 0 ? it.bzPrice : 0) || suggest(it, prices[r.id]) || it.bzPrice || 0;
+      if (!pr) { skipped++; continue; }                     // no price known (e.g. weapon without plan)
+      if (r.qty) { r.qty.focus(); setVal(r.qty, q); r.qty.blur(); }
+      else if (r.box) { if (!r.box.checked) r.box.click(); }
+      else { skipped++; continue; }
+      if (r.hasPrice) setMoney(r.li, pr);
+      mark(r.li, '#3d85c6'); n++;
+    }
+    return { n, skipped };
+  }
+
+  // ---- Personalize page
+  function fillPersonalize(want) {
+    const radios = [...document.querySelectorAll('input[type=radio]')];
+    const labelOf = r => ((r.labels && r.labels[0] && r.labels[0].textContent) || (document.querySelector(`label[for="${r.id}"]`) || {}).textContent || r.value || '');
+    const pick = radios.find(r => want === 'open' ? /open/i.test(labelOf(r)) : /clos/i.test(labelOf(r)));
+    if (!pick) return false;
+    pick.click();
+    const btn = [...document.querySelectorAll('button, input[type=submit], a')].find(b => /change details/i.test(b.textContent || b.value || ''));
+    if (btn) { btn.style.outline = '3px solid #e6b800'; btn.scrollIntoView({ block: 'center' }); }
+    return true;
+  }
+
+  // ---- Abroad shop: remember purchase prices (auto floor). Best effort – verified on next trip.
+  function captureAbroad() {
+    const onTravel = /sid=travel/.test(location.href) || (/\/index\.php/.test(location.pathname) && /in stock/i.test((document.querySelector('#mainContainer, .content-wrapper') || document.body).innerText || ''));
+    if (!onTravel) return;
+    let n = 0;
+    document.querySelectorAll('img[src*="/images/items/"]').forEach(img => {
+      if (img.closest('#tbm')) return;
+      const id = (img.getAttribute('src').match(/items\/(\d+)\//) || [])[1]; if (!id) return;
+      let row = img;
+      for (let i = 0; i < 6 && row && !(/\$\s?[\d,]+/.test(row.innerText || '') && /buy/i.test(row.innerText || '')); i++) row = row.parentElement;
+      if (!row || !/buy/i.test(row.innerText || '') || !/stock|in stock|cost/i.test(row.innerText || '')) return;
+      const cost = num(((row.innerText || '').match(/\$\s?([\d,]{1,})/) || [])[1]);
+      if (cost > 0) { abroad[id] = { cost, t: Date.now() }; n++; }
+    });
+    if (n) save('abroad', abroad);
+  }
+
+  /* =====================================================================
+   *  ACTIONS
+   * ===================================================================*/
+  const GO = { manage: 'https://www.torn.com/bazaar.php#/manage', add: 'https://www.torn.com/bazaar.php#/add', personalize: 'https://www.torn.com/bazaar.php#/personalize' };
+  function go(step) { if (pageMode() === step) runFlowStep(); else location.href = GO[step]; }
+
+  // 💲 Adjust prices only
+  async function actAdjust() {
+    if (!key) return askKey();
+    if (pageMode() === 'manage') {
+      await guard(async () => { const ids = manageRows().map(r => r.id).filter(id => items[id]); let i = 0; for (const id of ids) { i++; setStatus(`Prices ${i}/${ids.length} …`); await fetchPrice(id, false); } setStatus(''); });
+      const { n } = fillManage('adjust');
+      hookSave(/save changes/i, () => { });
+      return toast(n ? `${n} prices filled – press SAVE CHANGES yourself.` : 'All prices are already right.');
+    }
+    let n = 0;
+    for (const it of Object.values(items)) {
+      if (!it.bzQty || isUnique(it) || (it.plan && it.plan.locked)) continue;
+      if (cfg.manageMode === 'undercut' && status(it).k !== 'under') continue;
+      const v = suggest(it, prices[it.id]);
+      if (v && v !== it.bzPrice) { setPlanPrice(it, v, false); n++; }
+    }
+    persist(); render();
+    toast(n ? `${n} price changes added to the plan – press ▶ Apply plan when you are in Torn.` : 'No price changes needed.');
+  }
+  // 📦 Fill up all items
+  async function actFill() {
+    if (!key) return askKey();
+    if (pageMode() === 'add') {
+      const { n, skipped } = await fillAdd('fill');
+      hookSave(/add to bazaar/i, () => { });
+      return toast(n ? `${n} items filled${skipped ? `, ${skipped} skipped` : ''} – press ADD TO BAZAAR yourself.` : 'Nothing to fill with your current settings.');
+    }
+    let n = 0;
+    for (const it of fillScope()) {
+      const q = qtyFor(it.inv || 0, Object.assign({}, it, { plan: {} }));
+      if (q > 0) { P(it).qty = q; n++; }
+    }
+    persist(); render();
+    toast(n ? `${n} refills added to the plan – press ▶ Apply plan when you are in Torn.` : 'Nothing in your inventory to fill up with.');
+  }
+  // ▶ Apply plan
+  async function actApply() {
+    const c = planCounts();
+    if (!c.total) return toast('The plan is empty.');
+    const steps = [];
+    if (c.price || c.rem) steps.push('manage');
+    if (c.qty) steps.push('add');
+    if (c.bz) steps.push('personalize');
+    if (c.price) {                                  // price guard
+      const ok = await guard(async () => {
+        const ids = Object.keys(items).filter(id => items[id].plan && items[id].plan.price); let i = 0;
+        for (const id of ids) { i++; setStatus(`Checking prices ${i}/${ids.length} …`); await fetchPrice(id, true); }
+        setStatus('');
+      });
+      if (!ok) return;
+      const moved = Object.values(items).filter(it => {
+        const pl = it.plan || {}; if (!pl.price || !pl.priceRef) return false;
+        const now = lowestOther(prices[it.id]);
+        return now && Math.abs(now - pl.priceRef) / pl.priceRef * 100 > (+cfg.guardPct || 1);
+      });
+      if (moved.length) { showGuard(moved, steps); return; }
+    }
+    startFlow(steps);
+  }
+  function startFlow(steps) { flow = { steps, i: 0 }; save('flow', flow); render(); go(steps[0]); }
+  let flowRunning = false;
+  async function runFlowStep() {
+    if (!flow || flowRunning) return;
+    const step = flow.steps[flow.i];
+    if (pageMode() !== step) { render(); return; }
+    flowRunning = true;
+    await sleep(800);
+    let msgTxt = '';
+    if (step === 'manage') {
+      for (let i = 0; i < 20 && !manageRows().length; i++) await sleep(250);
+      const { n, r } = fillManage('plan');
+      msgTxt = `Step ${flow.i + 1}/${flow.steps.length}: ${n} prices${r ? ` and ${r} removals` : ''} filled – press SAVE CHANGES.`;
+      hookSave(/save changes/i, () => { for (const it of Object.values(items)) if (it.plan) { delete it.plan.price; delete it.plan.locked; delete it.plan.priceRef; } }, true);
+    } else if (step === 'add') {
+      const { n } = await fillAdd('plan');
+      msgTxt = `Step ${flow.i + 1}/${flow.steps.length}: ${n} items filled – press ADD TO BAZAAR.`;
+      hookSave(/add to bazaar/i, () => { for (const it of Object.values(items)) if (it.plan) delete it.plan.qty; }, true);
+    } else if (step === 'personalize') {
+      for (let i = 0; i < 20 && !document.querySelector('input[type=radio]'); i++) await sleep(250);
+      const ok = fillPersonalize(planBazaar);
+      msgTxt = ok ? `Step ${flow.i + 1}/${flow.steps.length}: bazaar set to ${planBazaar === 'open' ? 'OPEN' : 'CLOSED'} – press «change details».` : 'Could not find the Open/Closed choice on this page.';
+      hookSave(/change details/i, () => { bazaar.open = planBazaar === 'open'; planBazaar = null; }, true);
+    }
+    flowRunning = false;
+    openPanel(); toast(msgTxt);
+  }
+  function hookSave(re, done, isFlow) {
+    const btn = [...document.querySelectorAll('button, input[type=submit], a')].find(b => re.test(b.textContent || b.value || ''));
+    if (!btn) return;
+    if (isFlow) { if (btn.dataset.tbmFlow === String(flow && flow.i)) return; btn.dataset.tbmFlow = String(flow && flow.i); }
+    btn.addEventListener('click', () => {
+      done(); persist();
+      if (isFlow && flow) { flow.i++; if (flow.i >= flow.steps.length) flow = null; save('flow', flow); }
+      setTimeout(() => { save('lastAuto', 0); refresh(false, false); }, 3000);
+      render();
+    }, { once: true });
+  }
+  function nextStep() { if (flow) go(flow.steps[flow.i]); }
+  function cancelFlow() { flow = null; save('flow', null); render(); }
+
+  // 🔓 / 🔒
+  function actBazaar(want) {
+    planBazaar = want; save('planBazaar', planBazaar);
+    if (pageMode() === 'personalize') {
+      fillPersonalize(want) ? toast(`Set to ${want === 'open' ? 'OPEN' : 'CLOSED'} – press «change details» yourself.`) : toast('Could not find the Open/Closed choice.', true);
+      hookSave(/change details/i, () => { bazaar.open = want === 'open'; planBazaar = null; });
+      return;
+    }
+    if (!location.hostname.includes('torn.com')) return;
+    startFlow(['personalize']);
+  }
+  // ✕ remove item completely
+  function actRemove(id) {
+    const it = items[id]; if (!it) return;
+    if (!it.bzQty) { if (confirm(`Remove ${it.name} from the list?`)) { delete items[id]; persist(); render(); } return; }
+    if (!confirm(`Remove all ${it.bzQty} ${it.name} from your bazaar and from the list?`)) return;
+    P(it).remove = true; delete it.plan.price; delete it.plan.qty;
+    persist();
+    if (pageMode() === 'manage') { const { r } = fillManage('plan'); hookSave(/save changes/i, () => { }); toast(r ? 'Remove field filled – press SAVE CHANGES yourself.' : 'Could not find the item on this page.'); }
+    else toast(`${it.name} will be removed when you press ▶ Apply plan.`);
+    render();
+  }
+
+  /* =====================================================================
+   *  UI
+   * ===================================================================*/
   const CSS = `
-  #tbm-btn{position:fixed;right:14px;bottom:130px;z-index:999999;width:46px;height:46px;border-radius:50%;border:2px solid #6aa84f;background:#1b1b1b;color:#fff;font-size:22px;cursor:pointer;box-shadow:0 2px 10px #000a}
-  #tbm-btn .b{position:absolute;top:-4px;right:-4px;background:#cc0000;color:#fff;border-radius:9px;font:bold 11px Arial;padding:1px 5px;display:none}
-  #tbm{position:fixed;right:10px;bottom:185px;z-index:999999;width:820px;max-width:96vw;max-height:72vh;display:none;flex-direction:column;background:#1b1b1b;color:#ddd;font:12px/1.35 Arial;border:2px solid #6aa84f;border-radius:8px;box-shadow:0 6px 20px #000c}
+  #tbm-btn{position:relative}
+  #tbm-btn .tbm-badge{position:absolute;top:-5px;right:-5px;background:#cc0000;color:#fff;border-radius:9px;font:bold 10px/14px Arial;padding:0 4px;min-width:14px;text-align:center;display:none;z-index:2}
+  #tbm-btn.tbm-float{position:fixed;right:14px;bottom:130px;z-index:999999;width:44px;height:44px;border-radius:50%;border:2px solid #6aa84f;background:#1b1b1b;cursor:pointer;box-shadow:0 2px 10px #000a;display:flex;align-items:center;justify-content:center;color:#fff}
+  #tbm{position:fixed;right:8px;bottom:46px;z-index:999999;width:960px;max-width:calc(100vw - 16px);max-height:calc(100vh - 110px);display:none;flex-direction:column;background:#1b1b1b;color:#ddd;font:12px/1.35 Arial,sans-serif;border:2px solid #6aa84f;border-radius:8px;box-shadow:0 6px 20px #000c;text-align:left}
+  #tbm.tbm-floatpos{bottom:185px}
+  #tbm *{box-sizing:border-box}
   #tbm header{display:flex;align-items:center;gap:6px;padding:7px 9px;border-bottom:1px solid #333;flex-wrap:wrap}
-  #tbm header b{font-size:14px;color:#fff;margin-right:auto}
-  #tbm button{background:#2a2a2a;color:#eee;border:1px solid #555;border-radius:4px;padding:3px 8px;font:12px Arial;cursor:pointer}
-  #tbm button.g{background:#38761d;border-color:#6aa84f}#tbm button.bl{background:#0b3d6b;border-color:#3d85c6}
+  #tbm header .ttl{font-size:14px;color:#fff;font-weight:bold}
+  #tbm header .ver{color:#777;font-size:11px}
+  #tbm header .ad{color:#888;font-size:10px;margin-right:auto}
+  #tbm header .ad a{color:#8ab4f8}
+  #tbm .bz{padding:1px 7px;border-radius:9px;font-size:11px;color:#000;font-weight:bold}
+  #tbm button{background:#2a2a2a;color:#eee;border:1px solid #555;border-radius:4px;padding:4px 8px;font:12px Arial,sans-serif;cursor:pointer;white-space:nowrap;height:auto;line-height:1.3}
+  #tbm button:hover{border-color:#999}
   #tbm button:disabled{opacity:.45;cursor:default}
-  #tbm .tabs{display:flex;gap:4px;padding:5px 9px;border-bottom:1px solid #333;flex-wrap:wrap}
-  #tbm .tabs button.on{background:#444;border-color:#aaa}
-  #tbm .body{overflow:auto;padding:4px 9px 8px}
-  #tbm table{width:100%;border-collapse:collapse;color:#ddd;font:12px Arial}
-  #tbm th{position:sticky;top:0;background:#1b1b1b;text-align:left;color:#999;font-weight:normal;padding:4px 3px;border-bottom:1px solid #444}
+  #tbm button.g{background:#38761d;border-color:#6aa84f}
+  #tbm button.bl{background:#0b3d6b;border-color:#3d85c6}
+  #tbm button.y{background:#7f6000;border-color:#e6b800}
+  #tbm button.r{background:#5b0f00;border-color:#cc0000}
+  #tbm button.on{border-color:#6aa84f;box-shadow:0 0 0 1px #6aa84f inset;background:#274e13}
+  #tbm .bar{display:flex;gap:5px;padding:6px 9px;border-bottom:1px solid #333;flex-wrap:wrap;align-items:center}
+  #tbm .bar .sp{margin-left:auto}
+  #tbm .flow{background:#3d3400;color:#ffe599;padding:6px 9px;border-bottom:1px solid #7f6000;display:flex;gap:6px;align-items:center;flex-wrap:wrap}
+  #tbm .body{overflow:auto;padding:4px 9px 8px;flex:1}
+  #tbm table{width:100%;border-collapse:collapse;font:12px Arial,sans-serif}
+  #tbm th,#tbm td{color:#ddd !important;background:transparent}
+  #tbm th{position:sticky;top:0;background:#1b1b1b !important;text-align:left;color:#999 !important;font-weight:normal;padding:4px 3px;border-bottom:1px solid #444;z-index:1}
   #tbm td{padding:4px 3px;border-bottom:1px solid #2c2c2c;vertical-align:middle}
-  #tbm td.n{text-align:right;white-space:nowrap}
-  #tbm .st{display:inline-block;padding:1px 6px;border-radius:9px;color:#000;font-size:11px;white-space:nowrap}
-  #tbm input,#tbm select{background:#111;color:#eee;border:1px solid #444;border-radius:3px;padding:2px 4px;font:12px Arial}
-  #tbm input.fl{width:80px}
-  #tbm .set td:first-child{color:#bbb;width:230px}
-  #tbm .set h4{margin:10px 0 2px;color:#6aa84f;font-size:12px}
-  #tbm .hint{color:#888;font-size:11px}
-  #tbm .foot{padding:5px 9px;border-top:1px solid #333;color:#999;display:flex;gap:8px;align-items:center;flex-wrap:wrap}
-  #tbm .warn{color:#ffd966}
-  #tbm a{color:#8ab4f8;cursor:pointer}
-  `;
-  let tab = 'bazaar', filter = 'all', msg = '';
+  #tbm td.n,#tbm th.n{text-align:right;white-space:nowrap}
+  #tbm tr.planned td{background:#1e2a1a !important}
+  #tbm tr.removing td{background:#2a1515 !important}
+  #tbm .st{display:inline-block;padding:1px 6px;border-radius:9px;color:#000 !important;font-size:11px;white-space:nowrap}
+  #tbm input,#tbm select{background:#111;color:#eee;border:1px solid #444;border-radius:3px;padding:3px 5px;font:12px Arial,sans-serif;height:auto}
+  #tbm input.cp{width:92px;text-align:right}
+  #tbm input.cp.set{border-color:#6aa84f;color:#b6d7a8}
+  #tbm input.pq{width:52px;text-align:right}
+  #tbm a{color:#8ab4f8;cursor:pointer;text-decoration:none}
+  #tbm a.gear{color:#777;font-size:14px}
+  #tbm a.gear.custom{color:#6aa84f}
+  #tbm .mini{border:0 !important;background:none !important;padding:0 3px !important;color:#8ab4f8 !important;font-size:13px !important}
+  #tbm .card td{background:#222 !important;padding:8px 10px}
+  #tbm .card .grid{display:flex;gap:14px;flex-wrap:wrap;align-items:flex-end}
+  #tbm .card label{display:block;color:#999;font-size:11px;margin-bottom:2px}
+  #tbm .set h4{margin:12px 0 4px;color:#6aa84f;font-size:12px}
+  #tbm .set .q{margin:6px 0;color:#ddd}
+  #tbm .set .q>div:first-child{color:#ccc;margin-bottom:3px}
+  #tbm .hint{color:#999;font-size:11px}
+  #tbm .info{color:#8ab4f8;cursor:help;margin-left:3px}
+  #tbm .presets{display:flex;gap:6px;flex-wrap:wrap}
+  #tbm .presets button{padding:6px 10px}
+  #tbm .example{background:#222;border:1px solid #333;border-radius:4px;padding:6px 8px;margin:6px 0;color:#ddd}
+  #tbm .chip{display:inline-block;background:#333;border-radius:10px;padding:2px 8px;margin:2px;color:#ddd}
+  #tbm .chip a{color:#e06666;margin-left:4px}
+  #tbm details{margin-top:10px}
+  #tbm summary{cursor:pointer;color:#bbb}
+  #tbm .danger{border:1px solid #cc0000;border-radius:4px;padding:8px;margin-top:12px}
+  #tbm .danger h4{color:#e06666 !important;margin-top:0}
+  #tbm .foot{padding:5px 9px;border-top:1px solid #333;color:#999;display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+  #tbm .msg{color:#ffd966}
+  #tbm .msg.err{color:#ea9999}
+  #tbm .modal td{background:#2a2400 !important}
+  @media (max-width:700px){
+    #tbm{right:4px;left:4px;width:auto;max-width:none;bottom:50px;max-height:calc(100vh - 90px)}
+    #tbm .opt{display:none}
+    #tbm button{padding:7px 9px;font-size:13px}
+    #tbm input.cp{width:78px}
+    #tbm header .ad{width:100%;order:9}
+  }`;
+  let tab = 'items', filter = 'all', msg = '', msgErr = false, planMode = false, openCard = null, guardState = null;
+
+  const ICON = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 9l1.5-5h15L21 9"/><path d="M3 9h18v1.5a2.5 2.5 0 0 1-4.5 1.5 2.5 2.5 0 0 1-4.5 0 2.5 2.5 0 0 1-4.5 0A2.5 2.5 0 0 1 3 10.5z"/><path d="M5 13v7h14v-7"/><path d="M10 20v-4h4v4"/></svg>`;
 
   function build() {
-    if (document.getElementById('tbm-btn')) return;
-    const st = document.createElement('style'); st.textContent = CSS; document.head.appendChild(st);
-    const b = document.createElement('button'); b.id = 'tbm-btn'; b.title = 'Toppzy Bazaar Manager'; b.innerHTML = '🏪<span class="b"></span>';
-    document.body.appendChild(b);
-    const w = document.createElement('div'); w.id = 'tbm'; document.body.appendChild(w);
-    b.onclick = () => { const open = w.style.display !== 'flex'; w.style.display = open ? 'flex' : 'none'; if (open) { render(); if (key && Date.now() - lastRun > cfg.cacheMin * 60000) refresh(false, false); } };
+    if (!document.body) return;
+    if (!document.getElementById('tbm-css')) { const st = document.createElement('style'); st.id = 'tbm-css'; st.textContent = CSS; (document.head || document.body).appendChild(st); }
+    if (!document.getElementById('tbm')) { const w = document.createElement('div'); w.id = 'tbm'; document.body.appendChild(w); }
+    let b = document.getElementById('tbm-btn');
+    const ref = document.getElementById('notes_panel_button');          // Torn's own chat-bar button
+    if (ref && (!b || b.classList.contains('tbm-float') || !b.isConnected)) {
+      if (b) b.remove();
+      b = document.createElement('button');
+      b.type = 'button'; b.id = 'tbm-btn'; b.title = 'Toppzy Manager';
+      b.className = ref.className;                                       // borrow Torn's style at runtime
+      b.innerHTML = ICON + '<span class="tbm-badge"></span>';
+      const svg = ref.querySelector('svg'); if (svg && svg.getAttribute('class')) b.querySelector('svg').setAttribute('class', svg.getAttribute('class'));
+      ref.parentElement.insertBefore(b, ref);
+      b.onclick = togglePanel;
+      document.getElementById('tbm').classList.remove('tbm-floatpos');
+    } else if (!ref && !b) {
+      b = document.createElement('button'); b.type = 'button'; b.id = 'tbm-btn'; b.title = 'Toppzy Manager';
+      b.className = 'tbm-float'; b.innerHTML = ICON + '<span class="tbm-badge"></span>';
+      document.body.appendChild(b); b.onclick = togglePanel;
+      document.getElementById('tbm').classList.add('tbm-floatpos');
+    }
     badge();
   }
-  function setStatus(s) { msg = s; const e = document.getElementById('tbm-msg'); if (e) e.textContent = s; }
+  function togglePanel() {
+    const w = document.getElementById('tbm'); const open = w.style.display !== 'flex';
+    w.style.display = open ? 'flex' : 'none';
+    if (open) { render(); if (key && Date.now() - lastRun > cfg.cacheMin * 60000) refresh(false, false); }
+  }
+  function openPanel() { const w = document.getElementById('tbm'); if (w && w.style.display !== 'flex') { w.style.display = 'flex'; } render(); }
+  function setStatus(s) { msg = s; msgErr = false; const e = document.getElementById('tbm-msg'); if (e) { e.textContent = s; e.className = 'msg'; } }
+  function toast(s, err) { msg = s; msgErr = !!err; const e = document.getElementById('tbm-msg'); if (e) { e.textContent = s; e.className = 'msg' + (err ? ' err' : ''); } }
   function badge() {
-    const n = Object.values(tracked).filter(t => ['under', 'refill'].includes(status(t, priceCache[t.id]).k)).length;
-    const e = document.querySelector('#tbm-btn .b'); if (e) { e.textContent = n; e.style.display = n ? 'block' : 'none'; }
+    const n = Object.values(items).filter(it => ['under', 'sold'].includes(status(it).k)).length;
+    const e = document.querySelector('#tbm-btn .tbm-badge'); if (e) { e.textContent = n; e.style.display = n ? 'block' : 'none'; }
   }
   function askKey() {
-    const k = (prompt('Paste your own Torn API key (Limited/Minimal is enough – 16 characters). It is stored locally and only sent to api.torn.com:') || '').trim();
+    const k = (prompt('Paste your own Torn API key – level LIMITED (needed to read your bazaar). It is stored only in your browser and only sent to api.torn.com:') || '').trim();
     if (!k) return;
-    if (k.length !== 16) { alert('The key must be 16 characters.'); return; }
+    if (k.length !== 16) { alert('A Torn API key is 16 characters.'); return; }
     key = k; save('key', k); me = 0; save('me', 0); refresh(false, true);
   }
 
   function render() {
     const w = document.getElementById('tbm'); if (!w) return;
-    const all = Object.values(tracked);
-    const cnt = k => all.filter(t => status(t, priceCache[t.id]).k === k).length;
+    badge();
+    if (w.style.display !== 'flex') return;
+    const all = Object.values(items);
     const value = all.reduce((s, t) => s + (t.bzQty || 0) * (t.bzPrice || 0), 0);
-    const mode = pageMode();
-    const fillTxt = mode === 'manage' ? '✎ Fill prices (Manage)' : mode === 'add' ? '✎ Fill items (Add)' : '✎ Fill page';
+    const c = planCounts(), mode = pageMode();
+    const forSale = all.filter(t => t.bzQty > 0).length, empty = all.length - forSale;
+    const bz = bazaar.open == null ? '' : bazaar.open ? '<span class="bz" style="background:#6aa84f">🟢 Open</span>' : '<span class="bz" style="background:#e06666">🔴 Closed</span>';
+    const stepName = { manage: 'prices & removals (Manage)', add: 'refill (Add items)', personalize: 'open/close (Personalize)' };
     w.innerHTML = `
-      <header><b>🏪 Bazaar Manager <span style="color:#777;font-size:11px">demo 0.2.1</span></b>
-        <button class="g" data-a="refresh" title="Reload your bazaar, inventory and fresh Item Market + bazaar prices">⟳ Refresh prices</button>
-        <button class="bl" data-a="fill" ${mode === 'manage' || mode === 'add' ? '' : 'disabled title="Open Bazaar → Manage or Add items"'}>${fillTxt}</button>
-        <button data-a="key" title="API key">🔑</button><button data-a="close">✕</button></header>
-      <div class="tabs">
-        <button data-tab="bazaar" class="${tab === 'bazaar' ? 'on' : ''}">My items (${all.length})</button>
+      <header>
+        <span class="ttl">🏪 Toppzy Manager</span><span class="ver">v${VERSION}</span>
+        <span class="ad">· Like the script? Send a Xanax to <a href="https://www.torn.com/profiles.php?XID=4422625" target="_blank">Toppzy [4422625]</a></span>
+        ${bz}
+        <button data-a="refresh" title="Reload your bazaar, inventory and fresh prices">⟳ ${ago(lastRun)}</button>
+        <button data-a="key" title="API key">🔑</button><button data-a="close" title="Close">✕</button>
+      </header>
+      <div class="bar">
+        <button data-a="plan" class="${planMode ? 'on' : ''}" title="Plan mode: set refill amounts per item. Nothing happens in Torn until you press Apply plan.">📝 Plan${planMode ? ' (on)' : ''}</button>
+        <button data-a="apply" class="g" ${c.total ? '' : 'disabled'} title="Open the right bazaar page and fill in everything in your plan. You press Save / Add yourself.">▶ Apply plan${c.total ? ` (${c.total})` : ''}</button>
+        <button data-a="fill" class="bl" title="${mode === 'add' ? 'Fill quantities and prices on this page now' : 'Add a refill of your items to the plan'}">📦 Fill up${mode === 'add' ? ' now' : ''}</button>
+        <button data-a="adjust" class="bl" title="${mode === 'manage' ? 'Fill suggested prices on this page now' : 'Add suggested prices to the plan'}">💲 Adjust prices${mode === 'manage' ? ' now' : ''}</button>
+        <span class="sp"></span>
+        <button data-a="bzopen" title="Go to Personalize and choose Open – you press «change details»">🔓 Open bazaar</button>
+        <button data-a="bzclose" title="Go to Personalize and choose Closed – you press «change details»">🔒 Close bazaar</button>
+      </div>
+      ${flow ? `<div class="flow">▶ Applying plan – step ${flow.i + 1} of ${flow.steps.length}: <b>${stepName[flow.steps[flow.i]]}</b>
+        ${mode === flow.steps[flow.i] ? '<span>– press the Torn button to save.</span>' : `<button data-a="next" class="y">Go to step ${flow.i + 1}</button>`}
+        <button data-a="cancelflow">Cancel</button></div>` : ''}
+      ${guardState ? viewGuard() : ''}
+      <div class="bar">
+        <button data-tab="items" class="${tab === 'items' ? 'on' : ''}">My items (${all.length})</button>
         <button data-tab="inv" class="${tab === 'inv' ? 'on' : ''}">From inventory</button>
         <button data-tab="set" class="${tab === 'set' ? 'on' : ''}">⚙ Settings</button>
-        ${tab === 'bazaar' ? `<span style="margin-left:auto"></span>
-          <button data-f="all" class="${filter === 'all' ? 'on' : ''}">All</button>
-          <button data-f="under" class="${filter === 'under' ? 'on' : ''}">Undercut ${cnt('under')}</button>
-          <button data-f="sold" class="${filter === 'sold' ? 'on' : ''}">Sold out ${cnt('refill') + cnt('empty')}</button>` : ''}
+        ${tab === 'items' ? `<span class="sp hint">Show:</span>
+          <button data-f="all" class="${filter === 'all' ? 'on' : ''}">All (${all.length})</button>
+          <button data-f="sale" class="${filter === 'sale' ? 'on' : ''}">For sale (${forSale})</button>
+          <button data-f="empty" class="${filter === 'empty' ? 'on' : ''}">Empty (${empty})</button>` : ''}
       </div>
-      <div class="body">${tab === 'bazaar' ? viewBazaar() : tab === 'inv' ? viewInv() : viewSet()}</div>
-      <div class="foot"><span>In bazaar: <b style="color:#fff">${fmt(value)}</b></span><span>Updated: ${ago(lastRun)}</span>
-        <span class="hint">Price: ${esc(srcLabel())} ${esc(cfg.priceDelta)}</span>
-        <a data-a="go-manage">Go to Manage</a><a data-a="go-add">Go to Add items</a>
-        <span id="tbm-msg" class="warn">${esc(msg)}</span></div>`;
+      <div class="body">${tab === 'items' ? viewItems() : tab === 'inv' ? viewInv() : viewSet()}</div>
+      <div class="foot"><span>In bazaar: <b style="color:#fff">${fmt(value)}</b></span>
+        ${c.total ? `<span>Plan: ${[c.price && c.price + ' prices', c.qty && c.qty + ' refills', c.rem && c.rem + ' removals', c.bz && 'bazaar ' + planBazaar].filter(Boolean).join(' · ')} · <a data-a="clearplan">clear plan</a></span>` : ''}
+        <span id="tbm-msg" class="msg${msgErr ? ' err' : ''}">${esc(msg)}</span></div>`;
+    wire(w);
+  }
+
+  function wire(w) {
     w.querySelectorAll('[data-tab]').forEach(e => e.onclick = () => { tab = e.dataset.tab; render(); });
     w.querySelectorAll('[data-f]').forEach(e => e.onclick = () => { filter = e.dataset.f; render(); });
-    w.querySelectorAll('[data-a]').forEach(e => e.onclick = () => act(e.dataset.a, e));
-    w.querySelectorAll('input.fl').forEach(e => e.onchange = () => { const t = tracked[e.dataset.id]; if (t) { t.floor = +e.value.replace(/[^0-9]/g, '') || 0; save('tracked', tracked); render(); } });
+    w.querySelectorAll('[data-a]').forEach(e => { if (e.tagName !== 'SELECT') e.onclick = ev => { ev.preventDefault(); act(e.dataset.a, e); }; });
+    w.querySelectorAll('input.cp').forEach(e => e.onchange = () => { const it = items[e.dataset.id]; if (!it) return; setPlanPrice(it, num(e.value), true); persist(); render(); });
+    w.querySelectorAll('input.pq').forEach(e => e.onchange = () => { const it = items[e.dataset.id]; if (!it) return; const v = num(e.value); if (v > 0) P(it).qty = v; else delete P(it).qty; persist(); render(); });
     w.querySelectorAll('[data-set]').forEach(e => e.onchange = () => {
       const k = e.dataset.set;
-      cfg[k] = e.type === 'checkbox' ? e.checked : (typeof DEF[k] === 'number' ? (+e.value || 0) : e.value);
-      save('cfg', cfg); render();
+      let v = e.type === 'checkbox' ? e.checked : e.value;
+      if (typeof DEF[k] === 'number') v = num(v);
+      cfg[k] = v;
+      if (['priceSource', 'priceDelta', 'skipLowest', 'minPctOfMV'].includes(k)) cfg.preset = 'custom';
+      save('cfg', cfg); savedTick(); render();
     });
-    badge();
+    w.querySelectorAll('[data-card]').forEach(e => e.onchange = () => {
+      const it = items[e.dataset.id]; if (!it) return;
+      const k = e.dataset.card;
+      if (k === 'strategy') {
+        if (e.value === 'default') it.custom = null;
+        else if (PRESETS[e.value]) it.custom = Object.assign({ name: e.value }, PRESETS[e.value]);
+        else { const b = it.custom || strategyOf(null); it.custom = { name: 'custom', priceSource: b.priceSource, priceDelta: b.priceDelta, skipLowest: b.skipLowest, minPctOfMV: b.minPctOfMV }; }
+      } else if (k === 'floor') { const v = e.value.trim(); it.floor = v === '' ? null : num(v); }
+      else if (it.custom) { it.custom[k] = typeof DEF[k] === 'number' ? num(e.value) : e.value; }
+      persist(); savedTick(); render();
+    });
+    const dl = w.querySelector('#tbm-delta'); if (dl) dl.onchange = () => {
+      if (dl.value !== 'other') cfg.priceDelta = dl.value; else if (['-1', '-1%', '0'].includes(String(cfg.priceDelta))) cfg.priceDelta = '-2';
+      save('cfg', cfg); savedTick(); render();
+    };
+    const gsel = w.querySelectorAll('select[id^="tbm-g-"]'); gsel.forEach(s => s.onchange = () => { guardState.choice[s.id.slice(6)] = s.value; });
+    const nv = w.querySelector('#tbm-never'); if (nv) nv.onkeydown = ev => { if (ev.key === 'Enter') act('neveradd'); };
   }
-  const SRC = { lowestBoth: 'Lowest of Item Market & bazaar', lowestIM: 'Lowest Item Market', lowestBazaar: 'Lowest bazaar', avgBazaar: 'Average bazaar', market: 'Market value' };
-  const srcLabel = () => SRC[cfg.priceSource] + (+cfg.skipLowest ? ` (skip ${cfg.skipLowest})` : '');
+  function savedTick() { msg = '✓ Saved'; msgErr = false; setTimeout(() => { if (msg === '✓ Saved') { msg = ''; const e = document.getElementById('tbm-msg'); if (e) e.textContent = ''; } }, 1500); }
 
-  function viewBazaar() {
-    if (!key) return '<p>Press 🔑 and paste an API key to start.</p>';
-    let list = Object.values(tracked).map(t => ({ t, p: priceCache[t.id] || {}, s: status(t, priceCache[t.id]) }));
-    if (filter !== 'all') list = list.filter(x => filter === 'sold' ? (x.s.k === 'refill' || x.s.k === 'empty') : x.s.k === filter);
-    const order = { under: 0, refill: 1, ok: 2, empty: 3 };
-    list.sort((a, b) => order[a.s.k] - order[b.s.k] || (a.t.name || '').localeCompare(b.t.name || ''));
-    if (!list.length) return '<p>No items yet – press ⟳ Refresh prices.</p>';
-    return `<table><tr><th>Item</th><th class="n">In bazaar</th><th class="n">Your price</th><th class="n">Inv</th><th class="n">Lowest IM</th><th class="n">Lowest bazaar</th><th class="n">Avg bazaar</th><th class="n">Market v.</th><th class="n">Suggested</th><th>Floor</th><th>Status</th><th></th></tr>` +
-      list.map(({ t, p, s }) => `<tr>
-        <td><a href="https://www.torn.com/page.php?sid=ItemMarket#/market/view=search&itemID=${t.id}" target="_blank">${esc(t.name || t.id)}</a></td>
-        <td class="n">${t.bzQty || 0}</td><td class="n">${t.bzQty ? fmt(t.bzPrice) : '–'}</td><td class="n">${t.inv || 0}</td>
-        <td class="n">${fmt(nth(p.imList, 0))}</td><td class="n">${fmt(nth(p.bzList, 0))}</td><td class="n">${fmt(p.bzAvg)}</td><td class="n">${fmt(p.mv)}</td>
-        <td class="n"><b style="color:#fff">${fmt(suggest(t, priceCache[t.id]))}</b></td>
-        <td><input class="fl" data-id="${t.id}" value="${t.floor || ''}" placeholder="min $"></td>
-        <td><span class="st" style="background:${s.col}">${esc(s.txt)}</span></td>
-        <td><a data-a="forget" data-id="${t.id}" title="Stop tracking">✕</a></td></tr>`).join('') + '</table>';
+  function viewItems() {
+    if (!key) return '<p>Press 🔑 and paste a <b>Limited</b> API key to start.</p>';
+    let list = Object.values(items);
+    if (filter === 'sale') list = list.filter(t => t.bzQty > 0);
+    if (filter === 'empty') list = list.filter(t => !t.bzQty);
+    const order = { sold: 0, under: 1, ok: 2 };
+    list.sort((a, b) => order[status(a).k] - order[status(b).k] || (a.name || '').localeCompare(b.name || ''));
+    if (!list.length) return '<p>No items here – press ⟳ to load your bazaar.</p>';
+    return `<table><tr><th></th><th>Item</th><th class="n">In bazaar</th><th class="n opt">Inv</th><th class="n">Your price</th>
+      <th class="n opt" title="Torn may cache Item Market prices for up to 1 hour">Lowest IM</th><th class="n opt">Lowest bazaar</th><th class="n opt">Avg bazaar</th><th class="n opt">Market</th>
+      <th class="n">Suggested</th><th>Change price</th>${planMode ? '<th class="n">Refill qty</th>' : ''}<th>Status</th><th></th></tr>` +
+      list.map(it => {
+        const p = prices[it.id] || {}, s = status(it), pl = it.plan || {}, sug = suggest(it, prices[it.id]);
+        const f = floorOf(it), uniq = isUnique(it);
+        const cls = pl.remove ? 'removing' : (pl.price || pl.qty) ? 'planned' : '';
+        return `<tr class="${cls}">
+          <td><a class="gear ${it.custom || it.floor != null ? 'custom' : ''}" data-a="card" data-id="${it.id}" title="Settings for this item">⚙</a></td>
+          <td><a href="https://www.torn.com/page.php?sid=ItemMarket#/market/view=search&itemID=${it.id}" target="_blank">${esc(it.name || it.id)}</a>${f ? ` <span title="Floor ${fmt(f)}${it.floor > 0 ? ' (manual)' : ' (bought abroad)'}">🔒</span>` : ''}${it.custom ? ' <span class="hint" title="Own price strategy">★</span>' : ''}</td>
+          <td class="n">${it.bzQty || 0}</td><td class="n opt">${it.inv || 0}</td>
+          <td class="n">${it.bzQty ? fmt(it.bzPrice) : '–'}</td>
+          <td class="n opt" title="Checked ${ago(p.t)} (Torn may cache up to 1 h)">${fmt(nth(p.imList, 0))}${p.t ? `<div class="hint">${ago(p.t)}</div>` : ''}</td>
+          <td class="n opt">${p.t && cfg.useWeav3r && p.bzOk === false ? '<span class="hint" title="weav3r.dev did not answer – Item Market only">n/a</span>' : fmt(nth(p.bzList, 0))}</td>
+          <td class="n opt">${fmt(p.bzAvg)}</td><td class="n opt">${fmt(p.mv)}</td>
+          <td class="n">${uniq ? '<span class="hint" title="Weapons/armor: quality and bonuses vary – set the price yourself">manual</span>' : `<b style="color:#fff">${fmt(sug)}</b>${sug ? ` <button class="mini" data-a="usesug" data-id="${it.id}" title="Copy suggested into Change price">⇐</button>` : ''}`}</td>
+          <td><input class="cp ${pl.price ? 'set' : ''}" data-id="${it.id}" value="${pl.price ? pl.price.toLocaleString('en-US') : ''}" placeholder="new price">${pl.price ? ` <button class="mini" data-a="undo" data-id="${it.id}" title="Undo">↺</button>${it.bzQty ? `<div class="hint">${fmt(it.bzPrice)} → ${fmt(pl.price)}${pl.locked ? '' : ' (auto)'}</div>` : ''}` : ''}</td>
+          ${planMode ? `<td class="n"><input class="pq" data-id="${it.id}" value="${pl.qty || ''}" placeholder="${it.inv || 0}"></td>` : ''}
+          <td><span class="st" style="background:${pl.remove ? '#e06666' : s.col}">${pl.remove ? 'Removing' : esc(s.txt)}</span>${pl.qty ? ` <span class="hint">+${pl.qty} planned</span>` : ''}</td>
+          <td><a data-a="remove" data-id="${it.id}" title="Remove from bazaar and list">✕</a></td></tr>` +
+          (openCard === it.id ? viewCard(it) : '');
+      }).join('') + '</table>';
+  }
+
+  function viewCard(it) {
+    const s = it.custom, cur = s ? (s.name || 'custom') : 'default', auto = abroad[it.id];
+    const opt = (v, l) => `<option value="${v}" ${cur === v ? 'selected' : ''}>${l}</option>`;
+    return `<tr class="card"><td colspan="${planMode ? 14 : 13}">
+      <div class="grid">
+        <div><label>Price strategy for ${esc(it.name)}</label><select data-card="strategy" data-id="${it.id}">
+          ${opt('default', 'Use default (Settings)')}${opt('fast', '🏃 Sell fast')}${opt('balanced', '⚖️ Balanced')}${opt('profit', '💰 Max profit')}${opt('custom', '✏️ Custom')}</select></div>
+        ${cur === 'custom' ? `
+          <div><label>Beat</label><select data-card="priceSource" data-id="${it.id}">${Object.keys(SRC).map(k => `<option value="${k}" ${s.priceSource === k ? 'selected' : ''}>${SRC[k]}</option>`).join('')}</select></div>
+          <div><label>Change ($ or %)</label><input data-card="priceDelta" data-id="${it.id}" value="${esc(s.priceDelta)}" style="width:60px"></div>
+          <div><label>Ignore cheapest</label><input data-card="skipLowest" data-id="${it.id}" value="${s.skipLowest}" style="width:40px"></div>
+          <div><label>Never below % of market</label><input data-card="minPctOfMV" data-id="${it.id}" value="${s.minPctOfMV}" style="width:45px"></div>` : ''}
+        <div><label>Floor – never sell below <span class="info" title="Empty = automatic (price you paid abroad, if known). 0 = no floor.">ⓘ</span></label>
+          <input data-card="floor" data-id="${it.id}" value="${it.floor != null ? it.floor : ''}" placeholder="${auto ? 'auto ' + fmt(auto.cost) : 'none'}" style="width:100px"></div>
+        <div><button data-a="resetitem" data-id="${it.id}">↺ Reset to default</button></div>
+      </div>
+      <div class="hint" style="margin-top:6px">Settings here apply only to ${esc(it.name)} and stay locked even if you change the main Settings.${auto ? ` Seen abroad for ${fmt(auto.cost)} (${ago(auto.t)}).` : ''}</div>
+    </td></tr>`;
+  }
+
+  function viewGuard() {
+    const g = guardState;
+    return `<div class="body" style="flex:none;max-height:40vh;border-bottom:1px solid #7f6000;background:#2a2400">
+      <b style="color:#ffe599">⚠ The market has moved since you planned these prices</b>
+      <table class="modal"><tr><th>Item</th><th class="n">Your plan</th><th class="n">Cheapest then</th><th class="n">Cheapest now</th><th class="n">New suggestion</th><th>Use</th></tr>
+      ${g.items.map(it => { const p = prices[it.id], now = lowestOther(p), sug = suggest(it, p); return `<tr><td>${esc(it.name)}</td><td class="n">${fmt(it.plan.price)}</td><td class="n">${fmt(it.plan.priceRef)}</td><td class="n">${fmt(now)}</td><td class="n"><b>${fmt(sug)}</b></td>
+        <td><select id="tbm-g-${it.id}"><option value="keep">My plan</option><option value="new" ${g.choice[it.id] === 'new' ? 'selected' : ''}>New suggestion</option></select></td></tr>`; }).join('')}
+      </table>
+      <div style="margin-top:6px;display:flex;gap:6px;flex-wrap:wrap"><button data-a="guardnew" class="y">Use new prices for all</button><button data-a="guardgo" class="g">Continue with my choices</button><button data-a="guardcancel">Cancel</button></div></div>`;
+  }
+  function showGuard(moved, steps) { guardState = { items: moved, steps, choice: {} }; openPanel(); }
+  function guardFinish(allNew) {
+    for (const it of guardState.items) {
+      if (allNew || guardState.choice[it.id] === 'new') { const v = suggest(it, prices[it.id]); if (v) setPlanPrice(it, v, it.plan.locked); }
+      else it.plan.priceRef = lowestOther(prices[it.id]);
+    }
+    const steps = guardState.steps; guardState = null; persist(); startFlow(steps);
   }
 
   function viewInv() {
-    if (!invAll) return '<p>Scan your whole inventory (25 categories ≈ 25 API calls) to find items you can add.</p><button class="g" data-a="scan">Scan inventory</button>';
+    if (!invAll) return '<p>Scan your whole inventory to find items you can add to your list (about 25 API calls).</p><button class="g" data-a="scan">Scan inventory</button>';
     const list = Object.values(invAll).filter(i => i.amount > 0).sort((a, b) => a.name.localeCompare(b.name));
-    return `<p><button class="g" data-a="scan">Scan again</button> <button data-a="trackall">+ Track all (except excluded)</button>
-      <span class="hint">Only items you actually own. Equipped and faction-owned items are hidden.</span></p>
-      <table><tr><th>Item</th><th>Category</th><th class="n">Amount</th><th></th></tr>` +
-      list.map(i => `<tr><td>${esc(i.name)}${excluded(i.name) ? ' <span class="hint">(excluded)</span>' : ''}</td><td>${esc(i.type)}</td><td class="n">${i.amount}</td>
-        <td>${tracked[i.id] ? '<span style="color:#6aa84f">Tracked</span>' : `<button data-a="track" data-id="${i.id}">+ Track</button>`}</td></tr>`).join('') + '</table>';
+    return `<p><button class="g" data-a="scan">Scan again</button> <button data-a="trackall">+ Add all to my list (except Never sell)</button>
+      <span class="hint">Only items you own. Equipped and faction items are hidden.</span></p>
+      <table><tr><th>Item</th><th class="opt">Category</th><th class="n">Amount</th><th></th></tr>` +
+      list.map(i => `<tr><td>${esc(i.name)}${isNever(i.name) ? ' <span class="hint">(never sell)</span>' : ''}</td><td class="opt">${esc(i.type)}</td><td class="n">${i.amount}</td>
+        <td>${items[i.id] ? '<span style="color:#6aa84f">In my list</span>' : `<button data-a="track" data-id="${i.id}">+ Add</button>`}</td></tr>`).join('') + '</table>';
   }
 
-  const opt = (k, v, label) => `<option value="${v}" ${cfg[k] === v ? 'selected' : ''}>${label}</option>`;
+  function exampleLine() {
+    const it = Object.values(items).find(t => prices[t.id] && lowestOther(prices[t.id]) && !isUnique(t));
+    if (!it) return 'An example appears here after the first price refresh.';
+    const p = prices[it.id];
+    const base = basePrice(p, cfg);
+    const what = cfg.priceSource === 'market' ? 'normal market price' : cfg.priceSource === 'avgBazaar' ? 'average bazaar price' : 'price to beat';
+    return `Example – <b>${esc(it.name)}</b>: ${what} ${fmt(base)} → your price <b style="color:#fff">${fmt(suggest(Object.assign({}, it, { custom: null }), p))}</b>`;
+  }
+
   function viewSet() {
+    const pre = (k, ico, label, sub) => `<button data-a="preset" data-p="${k}" class="${cfg.preset === k ? 'on' : ''}" title="${sub}">${ico} ${label}${k === 'balanced' ? ' (recommended)' : ''}</button>`;
+    const o = (k, v, l) => `<option value="${v}" ${String(cfg[k]) === String(v) ? 'selected' : ''}>${l}</option>`;
+    const deltaChoice = ['-1', '-1%', '0'].includes(String(cfg.priceDelta)) ? String(cfg.priceDelta) : 'other';
+    const customCount = Object.values(items).filter(t => t.custom || t.floor != null).length;
+    const desc = { fast: '$1 under the cheapest seller. Never below 70 % of the market price.', balanced: '$1 under the cheapest seller, but ignores the single cheapest listing and never goes below 90 % of the market price.', profit: 'Market price − $1. Highest price, sells slower.', custom: 'You choose everything below.' };
     return `<div class="set">
-      <h4>💲 Price</h4><table>
-      <tr><td>Base price on</td><td><select data-set="priceSource">
-        ${opt('priceSource', 'lowestBoth', 'Lowest of Item Market & bazaar')}
-        ${opt('priceSource', 'lowestIM', 'Lowest Item Market')}
-        ${opt('priceSource', 'lowestBazaar', 'Lowest bazaar')}
-        ${opt('priceSource', 'avgBazaar', 'Average bazaar')}
-        ${opt('priceSource', 'market', 'Market value')}</select></td></tr>
-      <tr><td>Price delta</td><td><input data-set="priceDelta" value="${esc(cfg.priceDelta)}" style="width:70px"> <span class="hint">e.g. -1, 0, +100, -1%, -5%</span></td></tr>
-      <tr><td>Skip the N cheapest listings</td><td><input data-set="skipLowest" value="${cfg.skipLowest}" style="width:50px"> <span class="hint">0 = undercut the very lowest. 1–2 ignores single cheap dumps.</span></td></tr>
-      <tr><td>Never below % of market value</td><td><input data-set="minPctOfMV" value="${cfg.minPctOfMV}" style="width:50px"> % <span class="hint">0 = off. Per-item floor is set in My items.</span></td></tr>
-      </table>
-      <h4>➕ Add items page</h4><table>
-      <tr><td>Which items to fill</td><td><select data-set="addMode">
-        ${opt('addMode', 'refill', 'Refill sold-out items only')}
-        ${opt('addMode', 'tracked', 'All tracked items (My items)')}
-        ${opt('addMode', 'all', 'All items in inventory')}</select></td></tr>
-      <tr><td>Quantity</td><td><select data-set="qtyMode">
-        ${opt('qtyMode', 'all', 'Everything I have')}
-        ${opt('qtyMode', 'leave', 'Leave some in inventory')}</select>
-        ${cfg.qtyMode === 'leave' ? `leave <input data-set="leaveQty" value="${cfg.leaveQty}" style="width:45px">` : ''}</td></tr>
-      <tr><td>Never add (comma-separated names)</td><td><input data-set="exclude" value="${esc(cfg.exclude)}" style="width:100%"></td></tr>
-      </table>
-      <h4>✎ Manage page</h4><table>
-      <tr><td>Update prices on</td><td><select data-set="manageMode">
-        ${opt('manageMode', 'all', 'All items')}
-        ${opt('manageMode', 'undercut', 'Only items where I am undercut')}</select></td></tr>
-      </table>
-      <h4>⚙ API</h4><table>
-      <tr><td>Fresh prices before filling</td><td><input type="checkbox" data-set="refreshBeforeFill" ${cfg.refreshBeforeFill ? 'checked' : ''}> <span class="hint">uses prices younger than the cache time, fetches the rest</span></td></tr>
-      <tr><td>Reuse prices for (minutes)</td><td><input data-set="cacheMin" value="${cfg.cacheMin}" style="width:50px"></td></tr>
-      <tr><td>Max Torn API calls per minute</td><td><input data-set="tornPerMin" value="${cfg.tornPerMin}" style="width:50px"> <span class="hint">limit is 100 for your whole account</span></td></tr>
-      <tr><td>Bazaar prices from weav3r.dev</td><td><input type="checkbox" data-set="useWeav3r" ${cfg.useWeav3r ? 'checked' : ''}> <span class="hint">your key is never sent there</span></td></tr>
-      </table>
-      <p class="hint">The script only fills fields. You press «Save changes» / «Add to bazaar» yourself.</p>
-      <button data-a="defaults">Restore default settings</button> <button data-a="reset">Clear item list</button></div>`;
+      <h4>💲 How should prices be set?</h4>
+      <div class="presets">
+        ${pre('fast', '🏃', 'Sell fast', desc.fast)}${pre('balanced', '⚖️', 'Balanced', desc.balanced)}${pre('profit', '💰', 'Max profit', desc.profit)}${pre('custom', '✏️', 'Custom', desc.custom)}
+      </div>
+      <div class="hint" style="margin-top:4px">${desc[cfg.preset] || ''}</div>
+      <div class="example">${exampleLine()}</div>
+      ${cfg.preset === 'custom' ? `
+      <div class="q"><div>Who do you want to beat? <span class="info" title="The price your suggestion is based on.">ⓘ</span></div>
+        <select data-set="priceSource">${Object.keys(SRC).map(k => o('priceSource', k, SRC[k])).join('')}</select></div>
+      <div class="q"><div>How much cheaper? <span class="info" title="-1 = one dollar cheaper. -1% = one percent cheaper. 0 = same price.">ⓘ</span></div>
+        <select id="tbm-delta">${['-1', '-1%', '0', 'other'].map(v => `<option value="${v}" ${deltaChoice === v ? 'selected' : ''}>${{ '-1': '$1 cheaper', '-1%': '1 % cheaper', '0': 'Same price', other: 'Other…' }[v]}</option>`).join('')}</select>
+        ${deltaChoice === 'other' ? `<input data-set="priceDelta" value="${esc(cfg.priceDelta)}" style="width:70px"> <span class="hint">e.g. -100, -2%, +5%</span>` : ''}</div>
+      <div class="q"><div>Ignore suspiciously cheap listings? <span class="info" title="Someone selling 1 item far below everyone else can drag your price down. Ignoring the cheapest 1–2 listings protects you.">ⓘ</span></div>
+        <select data-set="skipLowest">${o('skipLowest', 0, 'No')}${o('skipLowest', 1, 'Ignore the cheapest one')}${o('skipLowest', 2, 'Ignore the two cheapest')}</select></div>
+      <div class="q"><div>Lowest price you accept <span class="info" title="Market price = Torn's normal price for the item. 0 = no limit.">ⓘ</span></div>
+        Never below <input data-set="minPctOfMV" value="${cfg.minPctOfMV}" style="width:50px"> % of the market price</div>` : ''}
+
+      <h4>📦 Fill up</h4>
+      <div class="q"><div>Which items?</div><select data-set="addWhich">${o('addWhich', 'listed', 'Items in my list (empty and low)')}${o('addWhich', 'empty', 'Only items that are empty (0)')}${o('addWhich', 'inventory', 'Everything I own')}</select></div>
+      <div class="q"><div>How many of each?</div><select data-set="qtyMode">${o('qtyMode', 'all', 'All I have')}${o('qtyMode', 'leave', 'All but a few')}${o('qtyMode', 'pct', 'A percentage')}</select>
+        ${cfg.qtyMode === 'leave' ? ` keep <input data-set="leaveQty" value="${cfg.leaveQty}" style="width:45px"> in my inventory` : ''}
+        ${cfg.qtyMode === 'pct' ? ` <input data-set="pctQty" value="${cfg.pctQty}" style="width:45px"> % of what I have` : ''}</div>
+      <div class="q"><div>Never sell <span class="info" title="Items here are never added to your bazaar by the script.">ⓘ</span></div>
+        ${cfg.neverSell.map((n, i) => `<span class="chip">${esc(n)}<a data-a="neverdel" data-i="${i}">✕</a></span>`).join('') || '<span class="hint">Nothing yet.</span>'}
+        <div style="margin-top:4px"><input id="tbm-never" placeholder="Item name, e.g. Xanax" style="width:180px"> <button data-a="neveradd">+ Add</button></div></div>
+
+      <h4>💲 Adjust prices</h4>
+      <div class="q"><div>Which items?</div><select data-set="manageMode">${o('manageMode', 'all', 'All items')}${o('manageMode', 'undercut', 'Only items where I am undercut')}</select></div>
+
+      <details><summary>Advanced</summary>
+        <div class="q"><div>Check my bazaar in the background every</div><select data-set="autoCheckMin">${o('autoCheckMin', 0, 'Off')}${o('autoCheckMin', 5, '5 minutes')}${o('autoCheckMin', 15, '15 minutes')}${o('autoCheckMin', 30, '30 minutes')}</select> <span class="hint">updates «Sold out» and the red number (about 3–10 API calls)</span></div>
+        <div class="q"><div>Reuse prices for</div><input data-set="cacheMin" value="${cfg.cacheMin}" style="width:50px"> minutes</div>
+        <div class="q"><div>Warn before Apply if the market moved more than</div><input data-set="guardPct" value="${cfg.guardPct}" style="width:50px"> %</div>
+        <div class="q"><div>Max Torn API calls per minute</div><input data-set="tornPerMin" value="${cfg.tornPerMin}" style="width:50px"> <span class="hint">Torn allows 100 per minute for your whole account</span></div>
+        <div class="q"><label style="color:#ccc"><input type="checkbox" data-set="useWeav3r" ${cfg.useWeav3r ? 'checked' : ''}> Use bazaar prices from weav3r.dev</label> <span class="hint">free service, your key is never sent there</span></div>
+      </details>
+
+      <div class="danger"><h4>Danger zone</h4>
+        <button data-a="resetall" class="r">Reset all items to default (${customCount})</button>
+        <button data-a="clearlist" class="r">Clear item list</button>
+        <div class="hint" style="margin-top:4px">The script only fills fields. You always press Save changes / Add to bazaar / change details yourself.</div></div>
+    </div>`;
   }
 
   function act(a, el) {
-    if (a === 'close') document.getElementById('tbm').style.display = 'none';
-    else if (a === 'refresh') refresh(false, true);
-    else if (a === 'scan') refresh(true, false);
-    else if (a === 'key') askKey();
-    else if (a === 'fill') fillPage();
-    else if (a === 'go-manage') location.href = 'https://www.torn.com/bazaar.php#/manage';
-    else if (a === 'go-add') location.href = 'https://www.torn.com/bazaar.php#/add';
-    else if (a === 'track' || a === 'trackall') {
-      const list = a === 'track' ? [invAll[el.dataset.id]] : Object.values(invAll).filter(i => i.amount > 0 && !excluded(i.name) && !tracked[i.id]);
-      for (const i of list) tracked[i.id] = { id: i.id, name: i.name, type: i.type, bzQty: 0, bzPrice: 0, inv: i.amount, floor: 0 };
-      save('tracked', tracked); render();
-      guard(async () => { let n = 0; for (const i of list) { n++; setStatus(`Prices ${n}/${list.length} …`); await fetchPrice(i.id); } setStatus(''); });
+    const id = el && el.dataset ? el.dataset.id : null;
+    switch (a) {
+      case 'close': document.getElementById('tbm').style.display = 'none'; return;
+      case 'refresh': return refresh(false, true);
+      case 'scan': return refresh(true, false);
+      case 'key': return askKey();
+      case 'plan': planMode = !planMode; return render();
+      case 'apply': return actApply();
+      case 'fill': return actFill();
+      case 'adjust': return actAdjust();
+      case 'bzopen': return actBazaar('open');
+      case 'bzclose': return actBazaar('close');
+      case 'next': return nextStep();
+      case 'cancelflow': return cancelFlow();
+      case 'clearplan': if (confirm('Clear the whole plan?')) { for (const it of Object.values(items)) it.plan = {}; planBazaar = null; persist(); render(); } return;
+      case 'card': openCard = openCard === id ? null : id; return render();
+      case 'usesug': { const it = items[id]; setPlanPrice(it, suggest(it, prices[id]), true); persist(); return render(); }
+      case 'undo': { const it = items[id]; setPlanPrice(it, 0); persist(); return render(); }
+      case 'remove': return actRemove(id);
+      case 'resetitem': { const it = items[id]; if (confirm(`Reset ${it.name} to default settings?`)) { it.custom = null; it.floor = null; persist(); render(); } return; }
+      case 'resetall': { const n = Object.values(items).filter(t => t.custom || t.floor != null).length; if (!n) return toast('No items have their own settings.'); if (confirm(`Reset ${n} items with custom settings to default?`)) { for (const t of Object.values(items)) { t.custom = null; t.floor = null; } persist(); render(); } return; }
+      case 'clearlist': if (confirm('Clear the whole item list? (Your bazaar in Torn is not changed.)')) { items = {}; prices = {}; persist(); render(); } return;
+      case 'preset': { const p = el.dataset.p; cfg.preset = p; if (PRESETS[p]) Object.assign(cfg, PRESETS[p]); save('cfg', cfg); savedTick(); return render(); }
+      case 'neveradd': { const inp = document.getElementById('tbm-never'); const v = (inp && inp.value || '').trim(); if (v && !isNever(v)) { cfg.neverSell.push(v); save('cfg', cfg); savedTick(); render(); } return; }
+      case 'neverdel': cfg.neverSell.splice(+el.dataset.i, 1); save('cfg', cfg); savedTick(); return render();
+      case 'track': case 'trackall': {
+        const list = a === 'track' ? [invAll[id]] : Object.values(invAll).filter(i => i.amount > 0 && !isNever(i.name) && !items[i.id]);
+        for (const i of list) items[i.id] = { id: i.id, name: i.name, type: i.type, bzQty: 0, bzPrice: 0, inv: i.amount, floor: null, custom: null, plan: {} };
+        persist(); render();
+        guard(async () => { let n = 0; for (const i of list) { n++; setStatus(`Prices ${n}/${list.length} …`); await fetchPrice(i.id); } setStatus(''); });
+        return;
+      }
+      case 'guardnew': return guardFinish(true);
+      case 'guardgo': return guardFinish(false);
+      case 'guardcancel': guardState = null; return render();
     }
-    else if (a === 'forget') { if (confirm('Stop tracking this item?')) { delete tracked[el.dataset.id]; save('tracked', tracked); render(); } }
-    else if (a === 'defaults') { cfg = Object.assign({}, DEF); save('cfg', cfg); render(); }
-    else if (a === 'reset') { if (confirm('Clear the whole item list?')) { tracked = {}; priceCache = {}; save('tracked', tracked); save('prices', priceCache); render(); } }
   }
 
+  /* =====================================================================
+   *  START
+   * ===================================================================*/
   build();
-  setInterval(() => { build(); const w = document.getElementById('tbm'); if (w && w.style.display === 'flex') { const b = w.querySelector('[data-a=fill]'); const m = pageMode(); if (b && b.disabled === (m === 'manage' || m === 'add')) render(); } }, 2000);
+  let lastHref = location.href;
+  setInterval(() => {
+    build();
+    if (location.href !== lastHref) { lastHref = location.href; render(); if (flow) runFlowStep(); }
+  }, 1500);
+  setInterval(autoCheck, 60000);
+  setTimeout(autoCheck, 5000);
+  setTimeout(() => { if (flow) runFlowStep(); captureAbroad(); }, 1500);
+  setInterval(captureAbroad, 10000);
 })();
