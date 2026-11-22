@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Toppzy Bazaar Manager (demo)
 // @namespace    toppzy.torn
-// @version      0.2.0
+// @version      0.2.1
 // @description  Floating button on every Torn page. Shows your bazaar, inventory, lowest Item Market and bazaar prices, suggests prices, remembers sold-out items (0 left) for refills, and fills the Add/Manage pages. Never saves by itself.
 // @author       Toppzy [4422625]
 // @match        https://www.torn.com/*
@@ -12,6 +12,9 @@
 // @connect      api.torn.com
 // @connect      weav3r.dev
 // @run-at       document-idle
+// @updateURL    https://raw.githubusercontent.com/skur-commits/torn-scripts/main/toppzy-bazaar-manager.user.js
+// @downloadURL  https://raw.githubusercontent.com/skur-commits/torn-scripts/main/toppzy-bazaar-manager.user.js
+// @homepageURL  https://github.com/skur-commits/torn-scripts
 // ==/UserScript==
 
 (function () {
@@ -337,7 +340,7 @@
     const mode = pageMode();
     const fillTxt = mode === 'manage' ? '✎ Fill prices (Manage)' : mode === 'add' ? '✎ Fill items (Add)' : '✎ Fill page';
     w.innerHTML = `
-      <header><b>🏪 Bazaar Manager <span style="color:#777;font-size:11px">demo 0.2</span></b>
+      <header><b>🏪 Bazaar Manager <span style="color:#777;font-size:11px">demo 0.2.1</span></b>
         <button class="g" data-a="refresh" title="Reload your bazaar, inventory and fresh Item Market + bazaar prices">⟳ Refresh prices</button>
         <button class="bl" data-a="fill" ${mode === 'manage' || mode === 'add' ? '' : 'disabled title="Open Bazaar → Manage or Add items"'}>${fillTxt}</button>
         <button data-a="key" title="API key">🔑</button><button data-a="close">✕</button></header>
