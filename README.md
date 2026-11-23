@@ -7,18 +7,19 @@ A Tampermonkey userscript that gives you a full overview of your bazaar, suggest
 ## Getting started
 1. Create a Torn API key with level **Limited** (Settings → API Keys). Limited is needed to read your own bazaar.
 2. Click the 🏪 button in Torn's bottom bar (next to Notes) → 🔑 → paste the key.
-3. Your bazaar loads. Everything you have ever had in your bazaar stays in the list – also when it is sold out (0).
+3. Your bazaar loads into **🏪 Bazaar list**. Everything you have ever had in your bazaar stays in the list – also when it is sold out (0). Add new items under **➕ Add from inventory** (Scan now, filter by category, sort by name / amount / value).
 
 ## Buttons
 | Button | What it does |
 |---|---|
 | 📝 Planmode | Prepare everything (prices and refill amounts per item) – nothing happens in Torn until you apply |
-| ▶ Apply plan | Opens Manage / Add items / Personalize one at a time and fills everything in your plan. You press Save yourself |
+| ▶ Apply plan | Opens Manage / Add items / Personalize one at a time and fills everything in your plan. You press Torn's own button (SAVE CHANGES / ADD TO BAZAAR / change details), which is highlighted in yellow. Not possible while traveling – your plan is kept |
 | 📦 Fill up | Refill the items in your list (amount from Settings: Fill all / Fill all −1 / All but N / %) |
 | 💲 Adjust prices | Only prices, from your price setting – also for empty items, so the refill is priced too (locked prices are never touched) |
 | 🔓 / 🔒 | Open or close your bazaar (Personalize page) |
 | ⚙ (per item) | Own price strategy and floor for one item + Reset to default |
 | ✕ (per item) | Empty item: removed from the list at once. Item for sale: asks, then removes it from your bazaar and the list |
+| ⟳ (top right) | Refresh prices – shows how long ago it was last done |
 
 Outside the bazaar pages (or while traveling) the quick buttons add to your plan. On the bazaar pages they fill in right away.
 

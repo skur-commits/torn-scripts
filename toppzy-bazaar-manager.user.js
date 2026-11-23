@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Toppzy Manager
 // @namespace    toppzy.torn
-// @version      0.3.1
+// @version      0.3.2
 // @description  Bazaar manager for Torn: overview of everything in your bazaar (also sold-out items), price suggestions from Item Market + bazaars, plan changes anywhere (even while flying) and apply them in Torn with one click. Only fills fields – you always press Save / Add yourself.
 // @author       Toppzy [4422625]
 // @match        https://www.torn.com/*
@@ -20,7 +20,7 @@
 (function () {
   'use strict';
   if (window.top !== window.self) return;
-  const VERSION = '0.3.1';
+  const VERSION = '0.3.2';
 
   /* =====================================================================
    *  SETTINGS
@@ -241,9 +241,13 @@
    * ===================================================================*/
   const P = it => (it.plan = it.plan || {});
   function planCounts() {
-    let price = 0, qty = 0, rem = 0;
-    for (const id in items) { const p = items[id].plan || {}; if (p.price) price++; if (p.qty > 0) qty++; if (p.remove) rem++; }
-    return { price, qty, rem, bz: planBazaar ? 1 : 0, total: price + qty + rem + (planBazaar ? 1 : 0) };
+    let price = 0, qty = 0, rem = 0, priceOut = 0, priceNoQty = 0;
+    for (const id in items) {
+      const it = items[id], p = it.plan || {};
+      if (p.price) { price++; if (it.bzQty > 0) priceOut++; else if (!(p.qty > 0)) priceNoQty++; }
+      if (p.qty > 0) qty++; if (p.remove) rem++;
+    }
+    return { price, qty, rem, priceOut, priceNoQty, bz: planBazaar ? 1 : 0, total: price + qty + rem + (planBazaar ? 1 : 0) };
   }
   function setPlanPrice(it, v, locked) {
     const p = P(it);
@@ -266,7 +270,8 @@
    * ===================================================================*/
   let busy = false, invAll = null;
   async function guard(fn) {
-    if (busy) return false;
+    for (let i = 0; i < 150 && busy; i++) await sleep(200);          // wait for a running refresh instead of silently doing nothing
+    if (busy) { toast('Still loading – try again in a moment.', true); return false; }
     if (!key) { askKey(); return false; }
     busy = true; let ok = true;
     try { await ensureMe(); await fn(); }
@@ -284,7 +289,7 @@
     setStatus(`Loading inventory (${cats.length} categories) …`);
     const inv = await fetchInventory(cats);
     for (const id in items) items[id].inv = inv[id] ? inv[id].amount : 0;
-    if (scanAll) invAll = inv;
+    if (scanAll) { invAll = inv; setStatus('Loading market values …'); await fetchInvValues(Object.keys(inv)); }
     const ids = Object.keys(items); let i = 0;
     for (const id of ids) { i++; setStatus(`Prices ${i}/${ids.length} …`); await fetchPrice(id, force); }
     lastRun = Date.now(); save('lastAuto', Date.now()); setStatus('');
@@ -460,7 +465,7 @@
       const { n } = fillManage('adjust');
       const e = planPrices(true); persist(); render();
       hookSave(/save changes/i, () => { });
-      return toast((n ? `${n} prices filled – press SAVE CHANGES yourself.` : 'All prices on this page are already right.') + (e ? ` ${e} empty items got a planned price.` : ''));
+      return toast((n ? `${n} prices filled – ${SAVE_TXT.manage}.` : 'All prices on this page are already right.') + (e ? ` ${e} empty items got a planned price.` : ''));
     }
     const n = planPrices(false);
     persist(); render();
@@ -472,7 +477,7 @@
     if (pageMode() === 'add') {
       const { n, skipped } = await fillAdd('fill');
       hookSave(/add to bazaar/i, () => { });
-      return toast(n ? `${n} items filled${skipped ? `, ${skipped} skipped` : ''} – press ADD TO BAZAAR yourself.` : 'Nothing to fill with your current settings.');
+      return toast(n ? `${n} items filled${skipped ? `, ${skipped} skipped` : ''} – ${SAVE_TXT.add}.` : 'Nothing to fill with your current settings.');
     }
     let n = 0;
     for (const it of fillScope()) {
@@ -483,13 +488,24 @@
     toast(n ? `${n} refills added to the plan – press ▶ Apply plan when you are in Torn.` : 'Nothing in your inventory to fill up with.');
   }
   // ▶ Apply plan
+  async function isTraveling() {
+    if (/unavailable while you('|’)re traveling/i.test(document.body.innerText || '')) return true;
+    try { const j = await torn('user/basic', 'Your status'); const st = ((j.profile || {}).status || {}).state || ''; return /travel|abroad/i.test(st); } catch (e) { return false; }
+  }
+  const TRAVEL_MSG = "You're traveling – your plan is saved. Apply it when you're back in Torn.";
   async function actApply() {
     const c = planCounts();
     if (!c.total) return toast('The plan is empty.');
+    if (!key) return askKey();
+    if (await isTraveling()) return toast(TRAVEL_MSG, true);
     const steps = [];
-    if (c.price || c.rem) steps.push('manage');
-    if (c.qty) steps.push('add');
+    if (c.priceOut || c.rem) steps.push('manage');          // prices on items for sale + removals
+    if (c.qty) steps.push('add');                            // refills (empty items use their planned price here)
     if (c.bz) steps.push('personalize');
+    const warn = c.priceNoQty ? `${c.priceNoQty} empty item${c.priceNoQty > 1 ? 's have' : ' has'} a price but no refill amount – press 📦 Fill up or set Refill qty in Planmode.` : '';
+    if (!steps.length) return toast(warn || 'Nothing to apply.', true);
+    if (warn) toast(warn, true);
+    applyNote = warn;
     if (c.price) {                                  // price guard
       const ok = await guard(async () => {
         const ids = Object.keys(items).filter(id => items[id].plan && items[id].plan.price); let i = 0;
@@ -506,7 +522,8 @@
     }
     startFlow(steps);
   }
-  function startFlow(steps) { flow = { steps, i: 0 }; save('flow', flow); render(); go(steps[0]); }
+  let applyNote = '';
+  function startFlow(steps) { flow = { steps, i: 0, note: applyNote || '' }; applyNote = ''; save('flow', flow); render(); go(steps[0]); }
   let flowRunning = false;
   async function runFlowStep() {
     if (!flow || flowRunning) return;
@@ -514,26 +531,33 @@
     if (pageMode() !== step) { render(); return; }
     flowRunning = true;
     await sleep(800);
+    if (/unavailable while you('|’)re traveling/i.test(document.body.innerText || '')) { flowRunning = false; flow = null; save('flow', null); openPanel(); toast(TRAVEL_MSG, true); return; }
     let msgTxt = '';
     if (step === 'manage') {
       for (let i = 0; i < 20 && !manageRows().length; i++) await sleep(250);
       const { n, r } = fillManage('plan');
-      msgTxt = `Step ${flow.i + 1}/${flow.steps.length}: ${n} prices${r ? ` and ${r} removals` : ''} filled – press SAVE CHANGES.`;
-      hookSave(/save changes/i, () => { for (const it of Object.values(items)) if (it.plan) { delete it.plan.price; delete it.plan.locked; delete it.plan.priceRef; } }, true);
+      msgTxt = `Step ${flow.i + 1}/${flow.steps.length}: ${n} prices${r ? ` and ${r} removals` : ''} filled – ${SAVE_TXT.manage}.`;
+      hookSave(/save changes/i, () => { for (const it of Object.values(items)) if (it.plan && it.bzQty > 0) { delete it.plan.price; delete it.plan.locked; delete it.plan.priceRef; } }, true);
     } else if (step === 'add') {
       const { n } = await fillAdd('plan');
-      msgTxt = `Step ${flow.i + 1}/${flow.steps.length}: ${n} items filled – press ADD TO BAZAAR.`;
-      hookSave(/add to bazaar/i, () => { for (const it of Object.values(items)) if (it.plan) delete it.plan.qty; }, true);
+      msgTxt = `Step ${flow.i + 1}/${flow.steps.length}: ${n} items filled – ${SAVE_TXT.add}.`;
+      hookSave(/add to bazaar/i, () => { for (const it of Object.values(items)) if (it.plan && it.plan.qty) { delete it.plan.qty; if (!it.bzQty) { delete it.plan.price; delete it.plan.locked; delete it.plan.priceRef; } } }, true);
     } else if (step === 'personalize') {
       for (let i = 0; i < 20 && !document.querySelector('input[type=radio]'); i++) await sleep(250);
       const ok = fillPersonalize(planBazaar);
-      msgTxt = ok ? `Step ${flow.i + 1}/${flow.steps.length}: bazaar set to ${planBazaar === 'open' ? 'OPEN' : 'CLOSED'} – press «change details».` : 'Could not find the Open/Closed choice on this page.';
+      msgTxt = ok ? `Step ${flow.i + 1}/${flow.steps.length}: bazaar set to ${planBazaar === 'open' ? 'OPEN' : 'CLOSED'} – ${SAVE_TXT.personalize}.` : 'Could not find the Open/Closed choice on this page.';
       hookSave(/change details/i, () => { bazaar.open = planBazaar === 'open'; planBazaar = null; }, true);
     }
     flowRunning = false;
-    openPanel(); toast(msgTxt);
+    openPanel(); toast(msgTxt + (flow && flow.note ? ' ⚠ ' + flow.note : ''), !!(flow && flow.note));
+  }
+  const SAVE_TXT = { manage: "press Torn's SAVE CHANGES button (top left of the bazaar list)", add: "press Torn's ADD TO BAZAAR button (top of the list)", personalize: "press Torn's «change details» button (bottom of the form)" };
+  function markSave(re) {
+    const btn = [...document.querySelectorAll('button, input[type=submit], a')].find(b => re.test(b.textContent || b.value || '') && !b.closest('#tbm'));
+    if (btn) { btn.style.outline = '3px solid #e6b800'; btn.style.outlineOffset = '2px'; btn.scrollIntoView({ block: 'center' }); }
   }
   function hookSave(re, done, isFlow) {
+    markSave(re);
     const btn = [...document.querySelectorAll('button, input[type=submit], a')].find(b => re.test(b.textContent || b.value || ''));
     if (!btn) return;
     if (isFlow) { if (btn.dataset.tbmFlow === String(flow && flow.i)) return; btn.dataset.tbmFlow = String(flow && flow.i); }
@@ -551,7 +575,7 @@
   function actBazaar(want) {
     planBazaar = want; save('planBazaar', planBazaar);
     if (pageMode() === 'personalize') {
-      fillPersonalize(want) ? toast(`Set to ${want === 'open' ? 'OPEN' : 'CLOSED'} – press «change details» yourself.`) : toast('Could not find the Open/Closed choice.', true);
+      fillPersonalize(want) ? toast(`Set to ${want === 'open' ? 'OPEN' : 'CLOSED'} – ${SAVE_TXT.personalize}.`) : toast('Could not find the Open/Closed choice.', true);
       hookSave(/change details/i, () => { bazaar.open = want === 'open'; planBazaar = null; });
       return;
     }
@@ -565,7 +589,7 @@
     if (!confirm(`Remove all ${it.bzQty} ${it.name} from your bazaar and from the list?`)) return;
     P(it).remove = true; delete it.plan.price; delete it.plan.qty;
     persist();
-    if (pageMode() === 'manage') { const { r } = fillManage('plan'); hookSave(/save changes/i, () => { }); toast(r ? 'Remove field filled – press SAVE CHANGES yourself.' : 'Could not find the item on this page.'); }
+    if (pageMode() === 'manage') { const { r } = fillManage('plan'); hookSave(/save changes/i, () => { });  toast(r ? `Remove field filled – ${SAVE_TXT.manage}.` : 'Could not find the item on this page.'); }
     else toast(`${it.name} will be removed when you press ▶ Apply plan.`);
     render();
   }
@@ -588,6 +612,8 @@
   #tbm header .ver{color:#777;font-size:11px}
   #tbm header .ad{color:#888;font-size:10px;margin-right:auto}
   #tbm header .ad a{color:#8ab4f8}
+  #tbm button.rf{border-color:#6aa84f;display:inline-flex;align-items:center;gap:4px}
+  #tbm .rfi{font-size:19px;line-height:14px;color:#fff;font-weight:bold}
   #tbm .bz{padding:1px 7px;border-radius:9px;font-size:11px;color:#000;font-weight:bold}
   #tbm button{background:#2a2a2a;color:#eee;border:1px solid #555;border-radius:4px;padding:4px 8px;font:12px Arial,sans-serif;cursor:pointer;white-space:nowrap;height:auto;line-height:1.3}
   #tbm button:hover{border-color:#999}
@@ -708,7 +734,7 @@
         <span class="ttl">🏪 Toppzy Manager</span><span class="ver">v${VERSION}</span>
         <span class="ad">· Like the script? Send a Xanax to <a href="https://www.torn.com/profiles.php?XID=4422625" target="_blank">Toppzy [4422625]</a></span>
         ${bz}
-        <button data-a="refresh" title="Reload your bazaar, inventory and fresh prices">⟳ ${ago(lastRun)}</button>
+        <button data-a="refresh" class="rf" title="Refresh prices – reloads your bazaar, inventory and fresh Item Market + bazaar prices for every item in your bazaar list"><span class="rfi">⟳</span> ${ago(lastRun)}</button>
         <button data-a="key" title="API key">🔑</button><button data-a="close" title="Close">✕</button>
       </header>
       <div class="bar">
@@ -721,12 +747,12 @@
         <button data-a="bzclose" title="Go to Personalize and choose Closed – you press «change details»">🔒 Close bazaar</button>
       </div>
       ${flow ? `<div class="flow">▶ Applying plan – step ${flow.i + 1} of ${flow.steps.length}: <b>${stepName[flow.steps[flow.i]]}</b>
-        ${mode === flow.steps[flow.i] ? '<span>– press the Torn button to save.</span>' : `<button data-a="next" class="y">Go to step ${flow.i + 1}</button>`}
+        ${mode === flow.steps[flow.i] ? `<span>– ${SAVE_TXT[flow.steps[flow.i]]}.</span>` : `<button data-a="next" class="y">Go to step ${flow.i + 1}</button>`}
         <button data-a="cancelflow">Cancel</button></div>` : ''}
       ${guardState ? viewGuard() : ''}
       <div class="bar">
-        <button data-tab="items" class="${tab === 'items' ? 'on' : ''}">My items (${all.length})</button>
-        <button data-tab="inv" class="${tab === 'inv' ? 'on' : ''}">From inventory</button>
+        <button data-tab="items" class="${tab === 'items' ? 'on' : ''}" title="The items in your bazaar list – also the ones at 0">🏪 Bazaar list (${all.length})</button>
+        <button data-tab="inv" class="${tab === 'inv' ? 'on' : ''}" title="Add new items from your inventory to your bazaar list">➕ Add from inventory</button>
         <button data-tab="set" class="${tab === 'set' ? 'on' : ''}">⚙ Settings</button>
         ${tab === 'items' ? `<span class="sp hint">Show:</span>
           <button data-f="all" class="${filter === 'all' ? 'on' : ''}">All (${all.length})</button>
@@ -784,7 +810,7 @@
     if (filter === 'empty') list = list.filter(t => !t.bzQty);
     const order = { sold: 0, under: 1, ok: 2 };
     list.sort((a, b) => order[status(a).k] - order[status(b).k] || (a.name || '').localeCompare(b.name || ''));
-    if (!list.length) return '<p>No items here – press ⟳ to load your bazaar.</p>';
+    if (!list.length) return '<p>No items here – press ⟳ to load your bazaar, or add items under ➕ Add from inventory.</p>';
     return `<table><tr><th></th><th>Item</th><th class="n">In bazaar</th><th class="n opt">Inv</th><th class="n">Your price</th>
       <th class="n opt" title="Torn may cache Item Market prices for up to 1 hour">Lowest IM</th><th class="n opt">Lowest bazaar</th><th class="n opt">Avg bazaar</th><th class="n opt">Market</th>
       <th class="n">Suggested</th><th>Change price</th>${planMode ? '<th class="n">Refill qty</th>' : ''}<th>Status</th><th></th></tr>` +
@@ -848,14 +874,48 @@
     const steps = guardState.steps; guardState = null; persist(); startFlow(steps);
   }
 
+  const PLURAL = { Plushie: 'Plushies', Flower: 'Flowers', Drug: 'Drugs', Material: 'Materials', 'Supply Pack': 'Supply Packs', Collectible: 'Collectibles', Enhancer: 'Enhancers', Tool: 'Tools', Booster: 'Boosters', Book: 'Books', Artifact: 'Artifacts', Car: 'Cars', 'Energy Drink': 'Energy Drinks', Defensive: 'Armor', Other: 'Other' };
+  const catName = t => PLURAL[t] || t;
+  let invCat = load('invCat', 'all'), invSort = load('invSort', { k: 'name', d: 1 });
+  function invVisible() {
+    let list = Object.values(invAll || {}).filter(i => i.amount > 0);
+    if (invCat !== 'all') list = list.filter(i => i.type === invCat);
+    const val = i => i.amount * ((invValues[i.id] && invValues[i.id].mp) || 0);
+    const k = invSort.k, d = invSort.d;
+    list.sort((a, b) => (k === 'amount' ? a.amount - b.amount : k === 'value' ? val(a) - val(b) : a.name.localeCompare(b.name)) * d || a.name.localeCompare(b.name));
+    return list;
+  }
   function viewInv() {
-    if (!invAll) return '<p>Scan your whole inventory to find items you can add to your list (about 25 API calls).</p><button class="g" data-a="scan">Scan inventory</button>';
-    const list = Object.values(invAll).filter(i => i.amount > 0).sort((a, b) => a.name.localeCompare(b.name));
-    return `<p><button class="g" data-a="scan">Scan again</button> <button data-a="trackall">+ Add all to my list (except Never sell)</button>
-      <span class="hint">Only items you own. Equipped and faction items are hidden.</span></p>
-      <table><tr><th>Item</th><th class="opt">Category</th><th class="n">Amount</th><th></th></tr>` +
-      list.map(i => `<tr><td>${esc(i.name)}${isNever(i.name) ? ' <span class="hint">(never sell)</span>' : ''}</td><td class="opt">${esc(i.type)}</td><td class="n">${i.amount}</td>
-        <td>${items[i.id] ? '<span style="color:#6aa84f">In my list</span>' : `<button data-a="track" data-id="${i.id}">+ Add</button>`}</td></tr>`).join('') + '</table>';
+    if (!invAll) return '<p>Scan your whole inventory to find items you can add to your bazaar list (about 25 API calls).</p><button class="g" data-a="scan">Scan now</button>';
+    const all = Object.values(invAll).filter(i => i.amount > 0);
+    const cats = {}; all.forEach(i => cats[i.type] = (cats[i.type] || 0) + 1);
+    if (invCat !== 'all' && !cats[invCat]) invCat = 'all';
+    const list = invVisible();
+    const arrow = k => invSort.k === k ? (invSort.d > 0 ? ' ▲' : ' ▼') : '';
+    const val = i => i.amount * ((invValues[i.id] && invValues[i.id].mp) || 0);
+    return `<div class="bar" style="padding:0 0 6px;border:0"><button class="g" data-a="scan">Scan now</button>
+        <button data-a="trackall">+ Add all${invCat !== 'all' ? ' ' + esc(catName(invCat)) : ''} to bazaar list (except Never sell)</button>
+        <span class="hint">Only items you own. Equipped and faction items are hidden.</span></div>
+      <div class="bar" style="padding:0 0 6px;border:0">
+        <button data-a="invcat" data-c="all" class="${invCat === 'all' ? 'on' : ''}">All (${all.length})</button>
+        ${Object.keys(cats).sort((a, b) => catName(a).localeCompare(catName(b))).map(c => `<button data-a="invcat" data-c="${esc(c)}" class="${invCat === c ? 'on' : ''}">${esc(catName(c))} (${cats[c]})</button>`).join('')}
+      </div>
+      <table><tr><th><a data-a="invsort" data-k="name">Item${arrow('name')}</a></th><th class="opt">Category</th><th class="n"><a data-a="invsort" data-k="amount">Amount${arrow('amount')}</a></th><th class="n"><a data-a="invsort" data-k="value" title="Amount × market price">Value${arrow('value')}</a></th><th></th></tr>` +
+      list.map(i => `<tr><td>${esc(i.name)}${isNever(i.name) ? ' <span class="hint">(never sell)</span>' : ''}</td><td class="opt">${esc(catName(i.type))}</td><td class="n">${i.amount}</td><td class="n">${fmt(val(i))}</td>
+        <td>${items[i.id] ? '<span style="color:#6aa84f">In bazaar list</span>' : `<button data-a="track" data-id="${i.id}">+ Add</button>`}</td></tr>`).join('') + '</table>';
+  }
+  // market prices for the inventory list – one bulk call (torn/{ids}/items)
+  let invValues = load('invValues', {});
+  async function fetchInvValues(ids) {
+    const need = ids.filter(id => !invValues[id] || Date.now() - invValues[id].t > cfg.cacheMin * 60000);
+    for (let i = 0; i < need.length; i += 100) {
+      const chunk = need.slice(i, i + 100);
+      try {
+        const j = await torn(`torn/${chunk.join(',')}/items`, 'Market values');
+        for (const it of j.items || []) invValues[String(it.id)] = { mp: +((it.value || {}).market_price) || 0, t: Date.now() };
+      } catch (e) { if ([2, 7, 16].includes(e.code)) throw e; }
+    }
+    save('invValues', invValues);
   }
 
   function exampleLine() {
@@ -944,12 +1004,15 @@
       case 'neveradd': { const inp = document.getElementById('tbm-never'); const v = (inp && inp.value || '').trim(); if (v && !isNever(v)) { cfg.neverSell.push(v); save('cfg', cfg); savedTick(); render(); } return; }
       case 'neverdel': cfg.neverSell.splice(+el.dataset.i, 1); save('cfg', cfg); savedTick(); return render();
       case 'track': case 'trackall': {
-        const list = a === 'track' ? [invAll[id]] : Object.values(invAll).filter(i => i.amount > 0 && !isNever(i.name) && !items[i.id]);
+        const list = a === 'track' ? [invAll[id]] : invVisible().filter(i => !isNever(i.name) && !items[i.id]);
         for (const i of list) items[i.id] = { id: i.id, name: i.name, type: i.type, bzQty: 0, bzPrice: 0, inv: i.amount, floor: null, custom: null, plan: {} };
         persist(); render();
+        if (list.length) toast(`${list.length} item${list.length > 1 ? 's' : ''} added to your bazaar list.`);
         guard(async () => { let n = 0; for (const i of list) { n++; setStatus(`Prices ${n}/${list.length} …`); await fetchPrice(i.id); } setStatus(''); });
         return;
       }
+      case 'invcat': invCat = el.dataset.c; save('invCat', invCat); return render();
+      case 'invsort': { const k = el.dataset.k; invSort = invSort.k === k ? { k, d: -invSort.d } : { k, d: k === 'name' ? 1 : -1 }; save('invSort', invSort); return render(); }
       case 'guardnew': return guardFinish(true);
       case 'guardgo': return guardFinish(false);
       case 'guardcancel': guardState = null; return render();
