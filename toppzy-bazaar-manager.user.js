@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Toppzy Manager
 // @namespace    toppzy.torn
-// @version      0.3.2
+// @version      0.3.3
 // @description  Bazaar manager for Torn: overview of everything in your bazaar (also sold-out items), price suggestions from Item Market + bazaars, plan changes anywhere (even while flying) and apply them in Torn with one click. Only fills fields – you always press Save / Add yourself.
 // @author       Toppzy [4422625]
 // @match        https://www.torn.com/*
@@ -20,7 +20,7 @@
 (function () {
   'use strict';
   if (window.top !== window.self) return;
-  const VERSION = '0.3.2';
+  const VERSION = '0.3.3';
 
   /* =====================================================================
    *  SETTINGS
@@ -136,6 +136,8 @@
     const b = j.bazaar || {};
     bazaar = { open: b.exists === false ? null : !!b.is_open, t: Date.now() };
     if (planBazaar && ((planBazaar === 'open') === bazaar.open)) planBazaar = null;   // plan done
+    // Torn's API returns an EMPTY item list while the bazaar is closed → keep the last known amounts (read from the Manage page)
+    if (bazaar.open === false && !(b.items || []).length) return;
     const seen = new Set();
     for (const it of b.items || []) {
       const id = String(it.id); seen.add(id);
@@ -228,6 +230,7 @@
   const lowestOther = p => p ? minPos([nth(p.imList, 0), nth(p.bzList, 0)]) : 0;
   function status(it) {
     const p = prices[it.id];
+    if (it.bzQty > 0 && bazaar && bazaar.open === false) return { k: 'closed', txt: 'Bazaar closed', col: '#999' };
     if (!it.bzQty) return { k: 'sold', txt: 'Sold out' + (it.inv > 0 ? ` · ${it.inv} in inv` : '') + (it.soldOutAt ? ` · ${ago(it.soldOutAt)}` : ''), col: '#3d85c6' };
     if (isUnique(it)) return { k: 'ok', txt: 'Manual price', col: '#999' };
     const lo = lowestOther(p);
@@ -339,6 +342,34 @@
       return id && price ? { id, price, remove, row } : null;
     }).filter(Boolean);
   }
+  // read amounts and prices straight from Torn's Manage page (works also while the bazaar is closed)
+  function readManage() {
+    const rows = manageRows(); if (!rows.length) return 0;
+    const seen = new Set(); let ch = 0;
+    for (const x of rows) {
+      seen.add(x.id);
+      const txt = x.row.innerText || '';
+      const qty = num((txt.match(/\bx\s?([\d,]+)/) || [])[1]);
+      const name = ((txt.split('\n').find(l => /\bx\s?[\d,]+/.test(l)) || '').replace(/\s*x\s?[\d,]+.*$/, '')).trim();
+      const hid = x.price.querySelector('input.input-money[type=hidden]'), vis = x.price.querySelector('input.input-money:not([type=hidden])');
+      const pr = num((hid && hid.value) || (vis && vis.value) || '');
+      if (!qty) continue;
+      const t = items[x.id] || (items[x.id] = { id: x.id, name: name || x.id, floor: null, custom: null, plan: {} });
+      if (!t.name || t.name === x.id) t.name = name || t.name;
+      if (t.bzQty !== qty || (pr && !t.bzPrice)) ch++;
+      t.bzQty = qty; if (pr && !(x.price.dataset.tbmTouched)) t.bzPrice = pr; t.soldOutAt = 0;
+    }
+    for (const id in items) { const t = items[id]; if (!seen.has(id) && t.bzQty > 0) { t.bzQty = 0; t.soldOutAt = Date.now(); ch++; } }
+    if (ch) { persist(); render(); }
+    return ch;
+  }
+  let lastManageRead = 0;
+  async function watchManage() {
+    if (pageMode() !== 'manage' || Date.now() - lastManageRead < 1500) return;
+    lastManageRead = Date.now();
+    for (let i = 0; i < 20 && !manageRows().length; i++) await sleep(250);
+    readManage();
+  }
   // mode: 'plan' (prices + removals from the plan) | 'adjust' (suggested prices now)
   function fillManage(mode) {
     let n = 0, r = 0;
@@ -355,7 +386,7 @@
         else v = suggest(it, prices[it.id]);
       }
       if (!v || v === it.bzPrice) continue;
-      setMoney(x.price, v); mark(x.row, '#6aa84f'); n++;
+      setMoney(x.price, v); x.price.dataset.tbmTouched = '1'; mark(x.row, '#6aa84f'); n++;
     }
     return { n, r };
   }
@@ -382,7 +413,17 @@
     }).filter(Boolean);
   }
   // mode: 'plan' (plan.qty items) | 'fill' (Fill up settings)
+  let addFilled = [];
+  function applyAddFilled() {           // after ADD TO BAZAAR: count the added items as in the bazaar right away
+    for (const f of addFilled) {
+      const t = items[f.id] || (items[f.id] = { id: f.id, name: f.name, type: f.type, floor: null, custom: null, plan: {} });
+      t.bzQty = (t.bzQty || 0) + f.q; if (!t.bzPrice || !(t.bzQty - f.q)) t.bzPrice = f.pr; t.soldOutAt = 0;
+      if (t.inv > 0) t.inv = Math.max(0, t.inv - f.q);
+    }
+    addFilled = [];
+  }
   async function fillAdd(mode) {
+    addFilled = [];
     const rows = await addRows();
     let n = 0, skipped = 0;
     for (const r of rows) {
@@ -403,6 +444,7 @@
       else if (r.box) { if (!r.box.checked) r.box.click(); }
       else { skipped++; continue; }
       if (r.hasPrice) setMoney(r.li, pr);
+      addFilled.push({ id: r.id, name: it.name || r.name, type: it.type || '', q, pr });
       mark(r.li, '#3d85c6'); n++;
     }
     return { n, skipped };
@@ -476,7 +518,7 @@
     if (!key) return askKey();
     if (pageMode() === 'add') {
       const { n, skipped } = await fillAdd('fill');
-      hookSave(/add to bazaar/i, () => { });
+      hookSave(/add to bazaar/i, applyAddFilled);
       return toast(n ? `${n} items filled${skipped ? `, ${skipped} skipped` : ''} – ${SAVE_TXT.add}.` : 'Nothing to fill with your current settings.');
     }
     let n = 0;
@@ -541,7 +583,7 @@
     } else if (step === 'add') {
       const { n } = await fillAdd('plan');
       msgTxt = `Step ${flow.i + 1}/${flow.steps.length}: ${n} items filled – ${SAVE_TXT.add}.`;
-      hookSave(/add to bazaar/i, () => { for (const it of Object.values(items)) if (it.plan && it.plan.qty) { delete it.plan.qty; if (!it.bzQty) { delete it.plan.price; delete it.plan.locked; delete it.plan.priceRef; } } }, true);
+      hookSave(/add to bazaar/i, () => { applyAddFilled(); for (const it of Object.values(items)) if (it.plan && it.plan.qty) { delete it.plan.qty; if (!it.bzQty) { delete it.plan.price; delete it.plan.locked; delete it.plan.priceRef; } } }, true);
     } else if (step === 'personalize') {
       for (let i = 0; i < 20 && !document.querySelector('input[type=radio]'); i++) await sleep(250);
       const ok = fillPersonalize(planBazaar);
@@ -556,15 +598,35 @@
     const btn = [...document.querySelectorAll('button, input[type=submit], a')].find(b => re.test(b.textContent || b.value || '') && !b.closest('#tbm'));
     if (btn) { btn.style.outline = '3px solid #e6b800'; btn.style.outlineOffset = '2px'; btn.scrollIntoView({ block: 'center' }); }
   }
+  // ---- one click in the panel = one press of Torn's own button (Torn rule: one input = one action)
+  const SAVE_RE = { manage: /save changes/i, add: /add to bazaar/i, personalize: /change details/i };
+  const SAVE_BTN = { manage: '💾 SAVE CHANGES', add: '➕ ADD TO BAZAAR', personalize: '✔ CHANGE DETAILS' };
+  let pendingSave = null;
+  const tornBtn = re => [...document.querySelectorAll('button, input[type=submit], a')].find(b => re.test(b.textContent || b.value || '') && !b.closest('#tbm'));
+  function pressTorn() {
+    const step = pageMode(), re = SAVE_RE[step];
+    if (!re || pendingSave !== step) return;
+    const btn = tornBtn(re);
+    if (!btn) return toast("Could not find Torn's button on this page.", true);
+    if (btn.disabled || /disabled/.test(btn.className || '')) return toast("Torn's button is not active – nothing has changed on this page.", true);
+    pendingSave = null; render();
+    btn.click();
+  }
   function hookSave(re, done, isFlow) {
     markSave(re);
-    const btn = [...document.querySelectorAll('button, input[type=submit], a')].find(b => re.test(b.textContent || b.value || ''));
+    const btn = tornBtn(re);
     if (!btn) return;
+    pendingSave = pageMode(); setTimeout(render, 0);
     if (isFlow) { if (btn.dataset.tbmFlow === String(flow && flow.i)) return; btn.dataset.tbmFlow = String(flow && flow.i); }
+    const step = pageMode();
     btn.addEventListener('click', () => {
+      pendingSave = null;
       done(); persist();
       if (isFlow && flow) { flow.i++; if (flow.i >= flow.steps.length) flow = null; save('flow', flow); }
+      // update automatically: Manage page is read again, and the API is asked again (Torn caches it ~30 s)
+      if (step === 'manage') setTimeout(() => { document.querySelectorAll('[data-tbm-touched]').forEach(e => delete e.dataset.tbmTouched); lastManageRead = 0; watchManage(); }, 2500);
       setTimeout(() => { save('lastAuto', 0); refresh(false, false); }, 3000);
+      setTimeout(() => { if (!busy) refresh(false, false); }, 35000);
       render();
     }, { once: true });
   }
@@ -625,6 +687,7 @@
   #tbm button.on{border-color:#6aa84f;box-shadow:0 0 0 1px #6aa84f inset;background:#274e13}
   #tbm .bar{display:flex;gap:5px;padding:6px 9px;border-bottom:1px solid #333;flex-wrap:wrap;align-items:center}
   #tbm .bar .sp{margin-left:auto}
+  #tbm .flow .big{font-size:13px;font-weight:bold;padding:5px 12px}
   #tbm .flow{background:#3d3400;color:#ffe599;padding:6px 9px;border-bottom:1px solid #7f6000;display:flex;gap:6px;align-items:center;flex-wrap:wrap}
   #tbm .body{overflow:auto;padding:4px 9px 8px;flex:1;min-height:0}
   #tbm table{width:100%;border-collapse:collapse;font:12px Arial,sans-serif}
@@ -747,8 +810,8 @@
         <button data-a="bzclose" title="Go to Personalize and choose Closed – you press «change details»">🔒 Close bazaar</button>
       </div>
       ${flow ? `<div class="flow">▶ Applying plan – step ${flow.i + 1} of ${flow.steps.length}: <b>${stepName[flow.steps[flow.i]]}</b>
-        ${mode === flow.steps[flow.i] ? `<span>– ${SAVE_TXT[flow.steps[flow.i]]}.</span>` : `<button data-a="next" class="y">Go to step ${flow.i + 1}</button>`}
-        <button data-a="cancelflow">Cancel</button></div>` : ''}
+        ${mode === flow.steps[flow.i] ? (pendingSave === mode ? `<button data-a="tornsave" class="g big" title="Presses Torn's own ${SAVE_BTN[mode].replace(/^\S+\s/, '')} button once">${SAVE_BTN[mode]}</button><span class="hint">(or ${SAVE_TXT[mode]})</span>` : `<span>– ${SAVE_TXT[flow.steps[flow.i]]}.</span>`) : `<button data-a="next" class="y">Go to step ${flow.i + 1}</button>`}
+        <button data-a="cancelflow">Cancel</button></div>` : (pendingSave && pendingSave === mode ? `<div class="flow">Ready on this page: <button data-a="tornsave" class="g big" title="Presses Torn's own button once">${SAVE_BTN[mode]}</button><span class="hint">(or ${SAVE_TXT[mode]})</span></div>` : '')}
       ${guardState ? viewGuard() : ''}
       <div class="bar">
         <button data-tab="items" class="${tab === 'items' ? 'on' : ''}" title="The items in your bazaar list – also the ones at 0">🏪 Bazaar list (${all.length})</button>
@@ -991,6 +1054,7 @@
       case 'bzopen': return actBazaar('open');
       case 'bzclose': return actBazaar('close');
       case 'next': return nextStep();
+      case 'tornsave': return pressTorn();
       case 'cancelflow': return cancelFlow();
       case 'clearplan': if (confirm('Clear the whole plan?')) { for (const it of Object.values(items)) it.plan = {}; planBazaar = null; persist(); render(); } return;
       case 'card': openCard = openCard === id ? null : id; return render();
@@ -1026,10 +1090,10 @@
   let lastHref = location.href;
   setInterval(() => {
     build();
-    if (location.href !== lastHref) { lastHref = location.href; render(); if (flow) runFlowStep(); }
+    if (location.href !== lastHref) { lastHref = location.href; pendingSave = null; render(); if (flow) runFlowStep(); watchManage(); }
   }, 1500);
   setInterval(autoCheck, 60000);
   setTimeout(autoCheck, 5000);
-  setTimeout(() => { if (flow) runFlowStep(); captureAbroad(); }, 1500);
+  setTimeout(() => { if (flow) runFlowStep(); captureAbroad(); watchManage(); }, 1500);
   setInterval(captureAbroad, 10000);
 })();

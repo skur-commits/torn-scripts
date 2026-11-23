@@ -13,7 +13,7 @@ A Tampermonkey userscript that gives you a full overview of your bazaar, suggest
 | Button | What it does |
 |---|---|
 | 📝 Planmode | Prepare everything (prices and refill amounts per item) – nothing happens in Torn until you apply |
-| ▶ Apply plan | Opens Manage / Add items / Personalize one at a time and fills everything in your plan. You press Torn's own button (SAVE CHANGES / ADD TO BAZAAR / change details), which is highlighted in yellow. Not possible while traveling – your plan is kept |
+| ▶ Apply plan | Opens Manage / Add items / Personalize one at a time and fills everything in your plan. Then press the big green button in the panel (💾 SAVE CHANGES / ➕ ADD TO BAZAAR / ✔ CHANGE DETAILS) – one click presses Torn's own button once – or press Torn's button yourself (highlighted in yellow). The list updates itself afterwards. Not possible while traveling – your plan is kept |
 | 📦 Fill up | Refill the items in your list (amount from Settings: Fill all / Fill all −1 / All but N / %) |
 | 💲 Adjust prices | Only prices, from your price setting – also for empty items, so the refill is priced too (locked prices are never touched) |
 | 🔓 / 🔒 | Open or close your bazaar (Personalize page) |
@@ -36,3 +36,7 @@ Outside the bazaar pages (or while traveling) the quick buttons add to your plan
 - Bazaar prices of other players come from the free service [weav3r.dev](https://weav3r.dev) (no key is sent). Can be turned off under Settings → Advanced.
 
 Like the script? Send a Xanax to [Toppzy [4422625]](https://www.torn.com/profiles.php?XID=4422625).
+
+**Closed bazaar:** Torn's API shows no items while your bazaar is closed. The script then keeps the last known amounts and shows «Bazaar closed». Open Bazaar → Manage and the amounts and prices are read straight from Torn's page.
+
+**Torn's rules:** one click = one action. The script never saves, adds or opens anything by itself.
