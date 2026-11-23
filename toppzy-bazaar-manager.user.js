@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Toppzy Manager
 // @namespace    toppzy.torn
-// @version      0.3.0
+// @version      0.3.1
 // @description  Bazaar manager for Torn: overview of everything in your bazaar (also sold-out items), price suggestions from Item Market + bazaars, plan changes anywhere (even while flying) and apply them in Torn with one click. Only fills fields – you always press Save / Add yourself.
 // @author       Toppzy [4422625]
 // @match        https://www.torn.com/*
@@ -20,7 +20,7 @@
 (function () {
   'use strict';
   if (window.top !== window.self) return;
-  const VERSION = '0.3.0';
+  const VERSION = '0.3.1';
 
   /* =====================================================================
    *  SETTINGS
@@ -32,8 +32,7 @@
   };
   const DEF = Object.assign({
     preset: 'balanced',
-    addWhich: 'listed',     // listed | empty | inventory
-    qtyMode: 'all',         // all | leave | pct
+    qtyMode: 'all',         // all | minus1 | leave | pct
     leaveQty: 1,
     pctQty: 50,
     neverSell: [],
@@ -63,6 +62,7 @@
 
   let cfg = Object.assign({}, DEF, load('cfg', {}));
   if (!Array.isArray(cfg.neverSell)) cfg.neverSell = [];
+  delete cfg.addWhich;                                                   // 0.3.1: Fill up always uses my list
   if ('exclude' in cfg) { delete cfg.exclude; delete cfg.strategy; cfg.preset = 'balanced'; Object.assign(cfg, PRESETS.balanced); save('cfg', cfg); } // 0.2 → 0.3
   let key = load('key', '');
   let me = load('me', 0);
@@ -252,13 +252,13 @@
   }
   function qtyFor(have, it) {
     if (it && it.plan && it.plan.qty > 0) return Math.min(it.plan.qty, have || it.plan.qty);
+    if (cfg.qtyMode === 'minus1') return have - 1;
     if (cfg.qtyMode === 'leave') return have - (+cfg.leaveQty || 0);
     if (cfg.qtyMode === 'pct') return Math.floor(have * (+cfg.pctQty || 0) / 100);
     return have;
   }
   function fillScope() {
-    return Object.values(items).filter(it => !isNever(it.name) && !(it.plan && it.plan.remove) &&
-      (cfg.addWhich === 'empty' ? !it.bzQty : true));
+    return Object.values(items).filter(it => !isNever(it.name) && !(it.plan && it.plan.remove));
   }
 
   /* =====================================================================
@@ -386,9 +386,7 @@
       let q;
       if (mode === 'plan') { if (!(it.plan && it.plan.qty > 0)) continue; q = Math.min(it.plan.qty, r.have); }
       else {
-        const tracked = !!items[r.id];
-        if (cfg.addWhich !== 'inventory' && !tracked) continue;
-        if (cfg.addWhich === 'empty' && it.bzQty) continue;
+        if (!items[r.id]) continue;                         // Fill up = only items in my list
         if (it.plan && it.plan.remove) continue;
         q = qtyFor(r.have, it);
       }
@@ -440,24 +438,33 @@
   const GO = { manage: 'https://www.torn.com/bazaar.php#/manage', add: 'https://www.torn.com/bazaar.php#/add', personalize: 'https://www.torn.com/bazaar.php#/personalize' };
   function go(step) { if (pageMode() === step) runFlowStep(); else location.href = GO[step]; }
 
+  // put suggested prices in the plan (Change price, «auto») – also for empty items. onlyEmpty: used on the Manage page
+  function planPrices(onlyEmpty) {
+    let n = 0;
+    for (const it of Object.values(items)) {
+      if (isUnique(it) || (it.plan && it.plan.locked) || (it.plan && it.plan.remove)) continue;
+      if (onlyEmpty && it.bzQty) continue;
+      if (it.bzQty && cfg.manageMode === 'undercut' && status(it).k !== 'under') continue;
+      const v = suggest(it, prices[it.id]);
+      if (!v) continue;
+      if (it.bzQty && v === it.bzPrice) { if (it.plan && it.plan.price && !it.plan.locked) setPlanPrice(it, 0); continue; }
+      setPlanPrice(it, v, false); n++;
+    }
+    return n;
+  }
   // 💲 Adjust prices only
   async function actAdjust() {
     if (!key) return askKey();
     if (pageMode() === 'manage') {
       await guard(async () => { const ids = manageRows().map(r => r.id).filter(id => items[id]); let i = 0; for (const id of ids) { i++; setStatus(`Prices ${i}/${ids.length} …`); await fetchPrice(id, false); } setStatus(''); });
       const { n } = fillManage('adjust');
+      const e = planPrices(true); persist(); render();
       hookSave(/save changes/i, () => { });
-      return toast(n ? `${n} prices filled – press SAVE CHANGES yourself.` : 'All prices are already right.');
+      return toast((n ? `${n} prices filled – press SAVE CHANGES yourself.` : 'All prices on this page are already right.') + (e ? ` ${e} empty items got a planned price.` : ''));
     }
-    let n = 0;
-    for (const it of Object.values(items)) {
-      if (!it.bzQty || isUnique(it) || (it.plan && it.plan.locked)) continue;
-      if (cfg.manageMode === 'undercut' && status(it).k !== 'under') continue;
-      const v = suggest(it, prices[it.id]);
-      if (v && v !== it.bzPrice) { setPlanPrice(it, v, false); n++; }
-    }
+    const n = planPrices(false);
     persist(); render();
-    toast(n ? `${n} price changes added to the plan – press ▶ Apply plan when you are in Torn.` : 'No price changes needed.');
+    toast(n ? `${n} prices added to the plan – press ▶ Apply plan when you are in Torn.` : 'No price changes needed.');
   }
   // 📦 Fill up all items
   async function actFill() {
@@ -554,7 +561,7 @@
   // ✕ remove item completely
   function actRemove(id) {
     const it = items[id]; if (!it) return;
-    if (!it.bzQty) { if (confirm(`Remove ${it.name} from the list?`)) { delete items[id]; persist(); render(); } return; }
+    if (!it.bzQty) { delete items[id]; if (openCard === id) openCard = null; persist(); render(); toast(`${it.name} removed from the list.`); return; }
     if (!confirm(`Remove all ${it.bzQty} ${it.name} from your bazaar and from the list?`)) return;
     P(it).remove = true; delete it.plan.price; delete it.plan.qty;
     persist();
@@ -567,9 +574,12 @@
    *  UI
    * ===================================================================*/
   const CSS = `
-  #tbm-btn{position:relative}
-  #tbm-btn .tbm-badge{position:absolute;top:-5px;right:-5px;background:#cc0000;color:#fff;border-radius:9px;font:bold 10px/14px Arial;padding:0 4px;min-width:14px;text-align:center;display:none;z-index:2}
-  #tbm-btn.tbm-float{position:fixed;right:14px;bottom:130px;z-index:999999;width:44px;height:44px;border-radius:50%;border:2px solid #6aa84f;background:#1b1b1b;cursor:pointer;box-shadow:0 2px 10px #000a;display:flex;align-items:center;justify-content:center;color:#fff}
+  #tbm-btn{position:relative;background:#8b0000 !important;color:#fff !important}
+  #tbm-btn:hover{background:#b00000 !important}
+  #tbm-btn svg{stroke:#fff !important;fill:none !important;color:#fff !important}
+  #tbm-btn svg *{stroke:#fff !important}
+  #tbm-btn .tbm-badge{position:absolute;top:-6px;right:-6px;background:#cc0000;color:#fff;border:1.5px solid #fff;border-radius:9px;font:bold 10px/13px Arial;padding:0 4px;min-width:14px;text-align:center;display:none;z-index:2}
+  #tbm-btn.tbm-float{position:fixed;right:14px;bottom:130px;z-index:999999;width:44px;height:44px;border-radius:50%;border:2px solid #fff;cursor:pointer;box-shadow:0 2px 10px #000a;display:flex;align-items:center;justify-content:center}
   #tbm{position:fixed;right:8px;bottom:46px;z-index:999999;width:960px;max-width:calc(100vw - 16px);max-height:calc(100vh - 110px);display:none;flex-direction:column;background:#1b1b1b;color:#ddd;font:12px/1.35 Arial,sans-serif;border:2px solid #6aa84f;border-radius:8px;box-shadow:0 6px 20px #000c;text-align:left}
   #tbm.tbm-floatpos{bottom:185px}
   #tbm *{box-sizing:border-box}
@@ -590,7 +600,7 @@
   #tbm .bar{display:flex;gap:5px;padding:6px 9px;border-bottom:1px solid #333;flex-wrap:wrap;align-items:center}
   #tbm .bar .sp{margin-left:auto}
   #tbm .flow{background:#3d3400;color:#ffe599;padding:6px 9px;border-bottom:1px solid #7f6000;display:flex;gap:6px;align-items:center;flex-wrap:wrap}
-  #tbm .body{overflow:auto;padding:4px 9px 8px;flex:1}
+  #tbm .body{overflow:auto;padding:4px 9px 8px;flex:1;min-height:0}
   #tbm table{width:100%;border-collapse:collapse;font:12px Arial,sans-serif}
   #tbm th,#tbm td{color:#ddd !important;background:transparent}
   #tbm th{position:sticky;top:0;background:#1b1b1b !important;text-align:left;color:#999 !important;font-weight:normal;padding:4px 3px;border-bottom:1px solid #444;z-index:1}
@@ -691,6 +701,7 @@
     const c = planCounts(), mode = pageMode();
     const forSale = all.filter(t => t.bzQty > 0).length, empty = all.length - forSale;
     const bz = bazaar.open == null ? '' : bazaar.open ? '<span class="bz" style="background:#6aa84f">🟢 Open</span>' : '<span class="bz" style="background:#e06666">🔴 Closed</span>';
+    const oldBody = w.querySelector('.body.main'), keep = oldBody ? { t: oldBody.scrollTop, l: oldBody.scrollLeft, tab: w.dataset.tab } : null;
     const stepName = { manage: 'prices & removals (Manage)', add: 'refill (Add items)', personalize: 'open/close (Personalize)' };
     w.innerHTML = `
       <header>
@@ -701,7 +712,7 @@
         <button data-a="key" title="API key">🔑</button><button data-a="close" title="Close">✕</button>
       </header>
       <div class="bar">
-        <button data-a="plan" class="${planMode ? 'on' : ''}" title="Plan mode: set refill amounts per item. Nothing happens in Torn until you press Apply plan.">📝 Plan${planMode ? ' (on)' : ''}</button>
+        <button data-a="plan" class="${planMode ? 'on' : ''}" title="Planmode: set refill amounts per item. Nothing happens in Torn until you press Apply plan.">📝 Planmode${planMode ? ' (on)' : ''}</button>
         <button data-a="apply" class="g" ${c.total ? '' : 'disabled'} title="Open the right bazaar page and fill in everything in your plan. You press Save / Add yourself.">▶ Apply plan${c.total ? ` (${c.total})` : ''}</button>
         <button data-a="fill" class="bl" title="${mode === 'add' ? 'Fill quantities and prices on this page now' : 'Add a refill of your items to the plan'}">📦 Fill up${mode === 'add' ? ' now' : ''}</button>
         <button data-a="adjust" class="bl" title="${mode === 'manage' ? 'Fill suggested prices on this page now' : 'Add suggested prices to the plan'}">💲 Adjust prices${mode === 'manage' ? ' now' : ''}</button>
@@ -722,10 +733,13 @@
           <button data-f="sale" class="${filter === 'sale' ? 'on' : ''}">For sale (${forSale})</button>
           <button data-f="empty" class="${filter === 'empty' ? 'on' : ''}">Empty (${empty})</button>` : ''}
       </div>
-      <div class="body">${tab === 'items' ? viewItems() : tab === 'inv' ? viewInv() : viewSet()}</div>
+      <div class="body main">${tab === 'items' ? viewItems() : tab === 'inv' ? viewInv() : viewSet()}</div>
       <div class="foot"><span>In bazaar: <b style="color:#fff">${fmt(value)}</b></span>
         ${c.total ? `<span>Plan: ${[c.price && c.price + ' prices', c.qty && c.qty + ' refills', c.rem && c.rem + ' removals', c.bz && 'bazaar ' + planBazaar].filter(Boolean).join(' · ')} · <a data-a="clearplan">clear plan</a></span>` : ''}
         <span id="tbm-msg" class="msg${msgErr ? ' err' : ''}">${esc(msg)}</span></div>`;
+    const nb = w.querySelector('.body.main');
+    if (keep && keep.tab === tab && nb) { nb.scrollTop = keep.t; nb.scrollLeft = keep.l; }
+    w.dataset.tab = tab;
     wire(w);
   }
 
@@ -787,7 +801,7 @@
           <td class="n opt">${p.t && cfg.useWeav3r && p.bzOk === false ? '<span class="hint" title="weav3r.dev did not answer – Item Market only">n/a</span>' : fmt(nth(p.bzList, 0))}</td>
           <td class="n opt">${fmt(p.bzAvg)}</td><td class="n opt">${fmt(p.mv)}</td>
           <td class="n">${uniq ? '<span class="hint" title="Weapons/armor: quality and bonuses vary – set the price yourself">manual</span>' : `<b style="color:#fff">${fmt(sug)}</b>${sug ? ` <button class="mini" data-a="usesug" data-id="${it.id}" title="Copy suggested into Change price">⇐</button>` : ''}`}</td>
-          <td><input class="cp ${pl.price ? 'set' : ''}" data-id="${it.id}" value="${pl.price ? pl.price.toLocaleString('en-US') : ''}" placeholder="new price">${pl.price ? ` <button class="mini" data-a="undo" data-id="${it.id}" title="Undo">↺</button>${it.bzQty ? `<div class="hint">${fmt(it.bzPrice)} → ${fmt(pl.price)}${pl.locked ? '' : ' (auto)'}</div>` : ''}` : ''}</td>
+          <td><input class="cp ${pl.price ? 'set' : ''}" data-id="${it.id}" value="${pl.price ? pl.price.toLocaleString('en-US') : ''}" placeholder="new price">${pl.price ? ` <button class="mini" data-a="undo" data-id="${it.id}" title="Undo">↺</button><div class="hint">${it.bzQty ? `${fmt(it.bzPrice)} → ${fmt(pl.price)}` : `new: ${fmt(pl.price)}${pl.qty ? ' × ' + pl.qty : ''}`}${pl.locked ? '' : ' (auto)'}</div>` : ''}</td>
           ${planMode ? `<td class="n"><input class="pq" data-id="${it.id}" value="${pl.qty || ''}" placeholder="${it.inv || 0}"></td>` : ''}
           <td><span class="st" style="background:${pl.remove ? '#e06666' : s.col}">${pl.remove ? 'Removing' : esc(s.txt)}</span>${pl.qty ? ` <span class="hint">+${pl.qty} planned</span>` : ''}</td>
           <td><a data-a="remove" data-id="${it.id}" title="Remove from bazaar and list">✕</a></td></tr>` +
@@ -877,9 +891,8 @@
       <div class="q"><div>Lowest price you accept <span class="info" title="Market price = Torn's normal price for the item. 0 = no limit.">ⓘ</span></div>
         Never below <input data-set="minPctOfMV" value="${cfg.minPctOfMV}" style="width:50px"> % of the market price</div>` : ''}
 
-      <h4>📦 Fill up</h4>
-      <div class="q"><div>Which items?</div><select data-set="addWhich">${o('addWhich', 'listed', 'Items in my list (empty and low)')}${o('addWhich', 'empty', 'Only items that are empty (0)')}${o('addWhich', 'inventory', 'Everything I own')}</select></div>
-      <div class="q"><div>How many of each?</div><select data-set="qtyMode">${o('qtyMode', 'all', 'All I have')}${o('qtyMode', 'leave', 'All but a few')}${o('qtyMode', 'pct', 'A percentage')}</select>
+      <h4>📦 Fill up <span class="info" title="Fill up always uses the items in your list (My items). Add items to the list under «From inventory».">ⓘ</span></h4>
+      <div class="q"><div>How many of each? <span class="info" title="A Refill qty you set on an item in Planmode always wins over this.">ⓘ</span></div><select data-set="qtyMode">${o('qtyMode', 'all', 'Fill all')}${o('qtyMode', 'minus1', 'Fill all −1 (keep 1)')}${o('qtyMode', 'leave', 'All but N (keep N)')}${o('qtyMode', 'pct', 'Percentage')}</select>
         ${cfg.qtyMode === 'leave' ? ` keep <input data-set="leaveQty" value="${cfg.leaveQty}" style="width:45px"> in my inventory` : ''}
         ${cfg.qtyMode === 'pct' ? ` <input data-set="pctQty" value="${cfg.pctQty}" style="width:45px"> % of what I have` : ''}</div>
       <div class="q"><div>Never sell <span class="info" title="Items here are never added to your bazaar by the script.">ⓘ</span></div>

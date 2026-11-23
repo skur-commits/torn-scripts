@@ -12,13 +12,13 @@ A Tampermonkey userscript that gives you a full overview of your bazaar, suggest
 ## Buttons
 | Button | What it does |
 |---|---|
-| 📝 Plan | Plan mode – set refill amounts per item |
+| 📝 Planmode | Prepare everything (prices and refill amounts per item) – nothing happens in Torn until you apply |
 | ▶ Apply plan | Opens Manage / Add items / Personalize one at a time and fills everything in your plan. You press Save yourself |
-| 📦 Fill up | Refill your items (amount from Settings: all / all but N / %) |
-| 💲 Adjust prices | Only prices, from your price setting (locked prices are never touched) |
+| 📦 Fill up | Refill the items in your list (amount from Settings: Fill all / Fill all −1 / All but N / %) |
+| 💲 Adjust prices | Only prices, from your price setting – also for empty items, so the refill is priced too (locked prices are never touched) |
 | 🔓 / 🔒 | Open or close your bazaar (Personalize page) |
 | ⚙ (per item) | Own price strategy and floor for one item + Reset to default |
-| ✕ (per item) | Remove all of that item from your bazaar and from the list |
+| ✕ (per item) | Empty item: removed from the list at once. Item for sale: asks, then removes it from your bazaar and the list |
 
 Outside the bazaar pages (or while traveling) the quick buttons add to your plan. On the bazaar pages they fill in right away.
 
