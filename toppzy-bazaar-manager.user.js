@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Toppzy Manager
 // @namespace    toppzy.torn
-// @version      0.3.6
+// @version      0.3.7
 // @description  Shopkeeper – bazaar manager for Torn: overview of everything in your bazaar (also sold-out items), price suggestions from Item Market + bazaars with an automatic safety floor (85 % of market, shop price, price paid abroad), prepare changes anywhere (even while flying) and apply them in Torn with one click. Only fills fields – you always press Save / Add yourself.
 // @author       Toppzy [4422625]
 // @match        https://www.torn.com/*
@@ -20,7 +20,7 @@
 (function () {
   'use strict';
   if (window.top !== window.self) return;
-  const VERSION = '0.3.6';
+  const VERSION = '0.3.7';
 
   /* =====================================================================
    *  SETTINGS
@@ -301,6 +301,7 @@
    * ===================================================================*/
   let busy = false, invAll = null;
   async function guard(fn) {
+    if (busy) toast('Waiting for the price check to finish …');
     for (let i = 0; i < 150 && busy; i++) await sleep(200);          // wait for a running refresh instead of silently doing nothing
     if (busy) { toast('Still loading – try again in a moment.', true); return false; }
     if (!key) { askKey(); return false; }
@@ -637,7 +638,7 @@
   // ---- one click in the panel = one press of Torn's own button (Torn rule: one input = one action)
   const SAVE_RE = { manage: /save changes/i, add: /add to bazaar/i, personalize: /change details/i };
   const SAVE_BTN = { manage: '💾 SAVE CHANGES', add: '➕ ADD TO BAZAAR', personalize: '✔ CHANGE DETAILS' };
-  let pendingSave = null;
+  let pendingSave = null, pendingConfirm = null, minimized = !!load('minimized', false);
   const tornBtn = re => [...document.querySelectorAll('button, input[type=submit], a')].find(b => re.test(b.textContent || b.value || '') && !b.closest('#tbm'));
   function pressTorn() {
     const step = pageMode(), re = SAVE_RE[step];
@@ -648,6 +649,16 @@
     pendingSave = null; render();
     btn.click();
   }
+  // Torn's own confirmation after ADD TO BAZAAR («Are you sure you want to add …?» + CONFIRM / Cancel)
+  const confirmBtn = () => [...document.querySelectorAll('input[type=submit], button')].find(b => /^\s*confirm/i.test(b.value || b.textContent || '') && !b.closest('#tbm'));
+  const confirmText = () => { const q = [...document.querySelectorAll('.items-footer .m-bottom5, .items-footer div')].find(e => /are you sure/i.test(e.textContent || '')); return q ? q.textContent.replace(/\s+/g, ' ').trim() : ''; };
+  function pressConfirm() {
+    if (!pendingConfirm) return;
+    const b = confirmBtn();
+    if (!b) { pendingConfirm = null; render(); return toast("Could not find Torn's CONFIRM button – press it on the page.", true); }
+    pendingConfirm = null; render();
+    b.click();
+  }
   function hookSave(re, done, isFlow) {
     markSave(re);
     const btn = tornBtn(re);
@@ -655,8 +666,7 @@
     pendingSave = pageMode(); setTimeout(render, 0);
     if (isFlow) { if (btn.dataset.tbmFlow === String(flow && flow.i)) return; btn.dataset.tbmFlow = String(flow && flow.i); }
     const step = pageMode();
-    btn.addEventListener('click', () => {
-      pendingSave = null;
+    const finish = () => {
       done(); persist();
       if (isFlow && flow) { flow.i++; if (flow.i >= flow.steps.length) flow = null; save('flow', flow); }
       // update automatically: Manage page is read again, and the API is asked again (Torn caches it ~30 s)
@@ -664,6 +674,21 @@
       setTimeout(() => { save('lastAuto', 0); refresh(false, false); }, 3000);
       setTimeout(() => { if (!busy) refresh(false, false); }, 35000);
       render();
+    };
+    btn.addEventListener('click', async () => {
+      pendingSave = null; render();
+      // does Torn ask for a confirmation? (Add items does) – then the change only happens on CONFIRM
+      let cb = null;
+      const onAdd = /#\/add/.test(location.hash);
+      for (let i = 0; onAdd && i < 12 && !cb; i++) { await sleep(200); cb = confirmBtn(); }
+      if (!cb) return finish();
+      pendingConfirm = { step, text: confirmText() }; render();
+      cb.addEventListener('click', () => { pendingConfirm = null; finish(); }, { once: true });
+      const cancel = [...document.querySelectorAll('.items-footer .clear-action, .items-footer a, .items-footer span')].find(e => /^\s*cancel\s*$/i.test(e.textContent || ''));
+      if (cancel) cancel.addEventListener('click', () => {          // back to the list – the ADD button is shown again
+        pendingConfirm = null; render();
+        setTimeout(() => { if (isFlow && flow) { const b = tornBtn(re); if (b) delete b.dataset.tbmFlow; } hookSave(re, done, isFlow); }, 600);
+      }, { once: true });
     }, { once: true });
   }
   function nextStep() { if (flow) go(flow.steps[flow.i]); }
@@ -702,8 +727,11 @@
   #tbm-btn svg *{stroke:#fff !important}
   #tbm-btn .tbm-badge{position:absolute;top:-6px;right:-6px;background:#cc0000;color:#fff;border:1.5px solid #fff;border-radius:9px;font:bold 10px/13px Arial;padding:0 4px;min-width:14px;text-align:center;display:none;z-index:2}
   #tbm-btn.tbm-float{position:fixed;right:14px;bottom:130px;z-index:999999;width:44px;height:44px;border-radius:50%;border:2px solid #fff;cursor:pointer;box-shadow:0 2px 10px #000a;display:flex;align-items:center;justify-content:center}
-  #tbm{position:fixed;right:8px;bottom:46px;z-index:999999;width:960px;max-width:calc(100vw - 16px);max-height:calc(100vh - 110px);display:none;flex-direction:column;background:#1b1b1b;color:#ddd;font:12px/1.35 Arial,sans-serif;border:2px solid #6aa84f;border-radius:8px;box-shadow:0 6px 20px #000c;text-align:left}
-  #tbm.tbm-floatpos{bottom:185px;max-height:calc(100vh - 200px)}
+  #tbm{position:fixed;right:8px;top:62px;bottom:auto;z-index:999999;width:960px;max-width:calc(100vw - 16px);height:calc(100vh - 116px);max-height:calc(100vh - 116px);display:none;flex-direction:column;background:#1b1b1b;color:#ddd;font:12px/1.35 Arial,sans-serif;border:2px solid #6aa84f;border-radius:8px;box-shadow:0 6px 20px #000c;text-align:left}
+  #tbm.tbm-floatpos{top:62px;bottom:auto;height:calc(100vh - 200px);max-height:calc(100vh - 200px)}
+  #tbm.min{height:auto !important}
+  #tbm.min > .bar, #tbm.min > .body.main{display:none !important}
+  #tbm .flow .q{color:#ffe599}
   #tbm *{box-sizing:border-box}
   #tbm header{display:flex;align-items:center;gap:6px;padding:7px 9px;border-bottom:1px solid #333;flex-wrap:wrap}
   #tbm header .ttl{font-size:14px;color:#fff;font-weight:bold}
@@ -774,7 +802,7 @@
   #tbm input.cp.low{border-color:#e06666 !important;color:#ea9999 !important}
   #tbm .lowtxt{color:#ea9999;font-size:11px}
   #tbm .lock{cursor:help}
-  #tbm.mob{left:0;right:0;top:0;bottom:0;width:auto;max-width:none;max-height:none;border-radius:0;border-width:0 0 0 0;font-size:14px}
+  #tbm.mob{left:0;right:0;top:0;bottom:0;width:auto;max-width:none;max-height:none;height:auto;border-radius:0;border-width:0 0 0 0;font-size:14px}
   #tbm.mob header .ad{width:100%;order:9}
   #tbm.mob button{padding:8px 10px;font-size:14px}
   #tbm.mob .seg button,#tbm.mob button.ico{padding:7px 9px}
@@ -871,6 +899,7 @@
       : `<button data-a="bzopen" title="Go to Personalize and choose Open – you press «change details»">🔓 Open bazaar</button>
         <button data-a="bzclose" title="Go to Personalize and choose Closed – you press «change details»">🔒 Close bazaar</button>`;
     w.classList.toggle('mob', mobileLayout());
+    w.classList.toggle('min', !!minimized && !mobileLayout());
     w.innerHTML = `
       <header>
         <span class="ttl">🏪 Shopkeeper</span><span class="ver">v${VERSION}</span>
@@ -878,7 +907,7 @@
         <span class="seg"><button data-a="view" data-v="simple" class="${simple ? 'on' : ''}" title="Only the main numbers">Simple</button><button data-a="view" data-v="advanced" class="${simple ? '' : 'on'}" title="All prices and details">Advanced</button></span>
         ${bz}
         <button data-a="refresh" class="rf" title="Refresh prices – reloads your bazaar, inventory and fresh Item Market + bazaar prices for every item in your bazaar list"><span class="rfi">⟳</span> ${ago(lastRun)}</button>
-        <button data-a="settings" class="ico gear-btn ${tab === 'set' ? 'on' : ''}" title="Settings">⚙️</button><button data-a="key" class="ico" title="API key">🔑</button><button data-a="close" class="ico" title="Close">✕</button>
+        <button data-a="settings" class="ico gear-btn ${tab === 'set' ? 'on' : ''}" title="Settings">⚙️</button><button data-a="key" class="ico" title="API key">🔑</button><button data-a="min" class="ico" title="${minimized ? 'Show the whole panel' : 'Minimize – see the Torn page; Save/Add/Confirm buttons stay visible'}">${minimized ? '▢' : '▁'}</button><button data-a="close" class="ico" title="Close">✕</button>
       </header>
       <div class="bar">
         <button data-a="apply" class="g" ${c.total ? '' : 'disabled'} title="Open the right bazaar page and fill in all your changes. You press Save / Add yourself.">▶ Apply${c.total ? ` (${c.total})` : ''}</button>
@@ -887,7 +916,8 @@
         <span class="sp"></span>
         ${bzBtns}
       </div>
-      ${flow ? `<div class="flow">▶ Applying changes – step ${flow.i + 1} of ${flow.steps.length}: <b>${stepName[flow.steps[flow.i]]}</b>
+      ${pendingConfirm && pendingConfirm.step === mode ? `<div class="flow">Torn asks: <span class="q">${esc(pendingConfirm.text || 'Are you sure?')}</span>
+        <button data-a="tornconfirm" class="g big" title="Presses Torn's own CONFIRM button once">✔ CONFIRM ${pendingConfirm.step === 'add' ? 'ADD' : ''}</button><span class="hint">(or press Torn's CONFIRM / Cancel on the page)</span></div>` : flow ? `<div class="flow">▶ Applying changes – step ${flow.i + 1} of ${flow.steps.length}: <b>${stepName[flow.steps[flow.i]]}</b>
         ${mode === flow.steps[flow.i] ? (pendingSave === mode ? `<button data-a="tornsave" class="g big" title="Presses Torn's own ${SAVE_BTN[mode].replace(/^\S+\s/, '')} button once">${SAVE_BTN[mode]}</button><span class="hint">(or ${SAVE_TXT[mode]})</span>` : `<span>– ${SAVE_TXT[flow.steps[flow.i]]}.</span>`) : `<button data-a="next" class="y">Go to step ${flow.i + 1}</button>`}
         <button data-a="cancelflow">Cancel</button></div>` : (pendingSave && pendingSave === mode ? `<div class="flow">Ready on this page: <button data-a="tornsave" class="g big" title="Presses Torn's own button once">${SAVE_BTN[mode]}</button><span class="hint">(or ${SAVE_TXT[mode]})</span></div>` : '')}
       ${lowState ? viewLow() : ''}
@@ -1190,6 +1220,8 @@
     const id = el && el.dataset ? el.dataset.id : null;
     switch (a) {
       case 'close': document.getElementById('tbm').style.display = 'none'; return render();
+      case 'min': minimized = !minimized; save('minimized', minimized); return render();
+      case 'tornconfirm': return pressConfirm();
       case 'refresh': return refresh(false, true);
       case 'scan': return refresh(true, false);
       case 'key': return askKey();
@@ -1241,7 +1273,7 @@
   let lastHref = location.href;
   setInterval(() => {
     build();
-    if (location.href !== lastHref) { lastHref = location.href; pendingSave = null; render(); if (flow) runFlowStep(); watchManage(); }
+    if (location.href !== lastHref) { lastHref = location.href; pendingSave = null; pendingConfirm = null; render(); if (flow) runFlowStep(); watchManage(); }
   }, 1500);
   let lastMob = null;
   window.addEventListener('resize', () => { const m = mobileLayout(); if (m !== lastMob) { lastMob = m; render(); } });

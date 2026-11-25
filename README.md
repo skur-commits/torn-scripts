@@ -18,16 +18,16 @@ A Tampermonkey userscript that gives you a full overview of your bazaar, suggest
 ## Buttons
 | Button | What it does |
 |---|---|
-| ▶ Apply (N) | Opens Manage / Add items / Personalize one at a time and fills in all your changes. Then press the big green button in the panel (💾 SAVE CHANGES / ➕ ADD TO BAZAAR / ✔ CHANGE DETAILS) – one click presses Torn's own button once – or press Torn's button yourself (highlighted in yellow). The list updates itself afterwards. Not possible while traveling – your changes are kept |
+| ▶ Apply (N) | Opens Manage / Add items / Personalize one at a time and fills in all your changes. Then press the big green button in the panel (💾 SAVE CHANGES / ➕ ADD TO BAZAAR / ✔ CHANGE DETAILS) – one click presses Torn's own button once – or press Torn's button yourself (highlighted in yellow). When Torn asks *Are you sure…?* after ADD TO BAZAAR, the panel shows ✔ CONFIRM ADD for that last step. The list updates itself afterwards. Not possible while traveling – your changes are kept |
 | 📦 Fill all | Refill all items in your list (amount from Settings: Everything in inventory / All −1 / All but N / %). Items where a shop pays more are skipped |
 | 💲 Adjust all prices | Suggested price on all items – also empty ones, so the refill is priced too (your own prices are never touched) |
 | Refill to + Max | How many you want in your bazaar **in total**. Max = everything you have. «+N» shows how many will be added |
 | 🔓 / 🔒 | Open or close your bazaar (Personalize page) |
 | ⚙ (per item) | Own price strategy and floor for one item, Reset to default, Remove item |
 | ✕ (Advanced) | Empty item: removed from the list at once. Item for sale: asks, then removes it from your bazaar and the list |
-| ⟳ · ⚙ · 🔑 (top right) | Refresh prices · Settings · API key |
+| ⟳ · ⚙ · 🔑 · ▁ (top right) | Refresh prices · Settings · API key · Minimize the panel (▢ restores it) |
 
-Outside the bazaar pages (or while traveling) the buttons only prepare changes. On the bazaar pages they fill in right away.
+Outside the bazaar pages (or while traveling) the buttons only prepare changes. On the bazaar pages they fill in right away. The panel stays in a fixed spot at the top right, so it no longer jumps when you switch tabs. If you click while prices are still being checked, the panel shows *Waiting for the price check to finish …* and carries on by itself.
 
 ## Prices and floor
 - **Suggested** = cheapest seller (Item Market + bazaars) minus $1, by default ignoring the single cheapest listing and never below 90 % of market value (*Balanced*). Other presets: *Sell fast*, *Max profit*, *Custom*.
