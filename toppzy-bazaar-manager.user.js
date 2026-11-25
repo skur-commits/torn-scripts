@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Toppzy Manager
 // @namespace    toppzy.torn
-// @version      0.3.4
+// @version      0.3.5
 // @description  Shopkeeper – bazaar manager for Torn: overview of everything in your bazaar (also sold-out items), price suggestions from Item Market + bazaars with an automatic safety floor (85 % of market, shop price, price paid abroad), prepare changes anywhere (even while flying) and apply them in Torn with one click. Only fills fields – you always press Save / Add yourself.
 // @author       Toppzy [4422625]
 // @match        https://www.torn.com/*
@@ -20,7 +20,7 @@
 (function () {
   'use strict';
   if (window.top !== window.self) return;
-  const VERSION = '0.3.4';
+  const VERSION = '0.3.5';
 
   /* =====================================================================
    *  SETTINGS
@@ -760,6 +760,7 @@
   #tbm .seg button{border:0 !important;border-radius:0}
   #tbm .seg button.on{box-shadow:none}
   #tbm button.ico{padding:4px 7px}
+  #tbm button.gear-btn{font-size:15px;line-height:16px;padding:2px 6px}
   #tbm .sug{border:1px solid #3d85c6 !important;background:#0b2a4a !important;color:#9fc5e8 !important;border-radius:3px;padding:2px 6px !important;font-size:11px !important}
   #tbm .max{padding:2px 6px !important;font-size:11px !important}
   #tbm .add{color:#b6d7a8;font-size:11px;margin-left:3px}
@@ -845,7 +846,7 @@
         <span class="seg"><button data-a="view" data-v="simple" class="${simple ? 'on' : ''}" title="Only the main numbers">Simple</button><button data-a="view" data-v="advanced" class="${simple ? '' : 'on'}" title="All prices and details">Advanced</button></span>
         ${bz}
         <button data-a="refresh" class="rf" title="Refresh prices – reloads your bazaar, inventory and fresh Item Market + bazaar prices for every item in your bazaar list"><span class="rfi">⟳</span> ${ago(lastRun)}</button>
-        <button data-a="settings" class="ico ${tab === 'set' ? 'on' : ''}" title="Settings">⚙</button><button data-a="key" class="ico" title="API key">🔑</button><button data-a="close" class="ico" title="Close">✕</button>
+        <button data-a="settings" class="ico gear-btn ${tab === 'set' ? 'on' : ''}" title="Settings">⚙️</button><button data-a="key" class="ico" title="API key">🔑</button><button data-a="close" class="ico" title="Close">✕</button>
       </header>
       <div class="bar">
         <button data-a="apply" class="g" ${c.total ? '' : 'disabled'} title="Open the right bazaar page and fill in all your changes. You press Save / Add yourself.">▶ Apply${c.total ? ` (${c.total})` : ''}</button>
@@ -923,7 +924,7 @@
     if (!list.length) return '<p>No items here – press ⟳ to load your bazaar, or add items under ➕ Add from inventory.</p>';
     const simple = cfg.view !== 'advanced';
     const head = simple
-      ? `<tr><th></th><th>Item</th><th class="n">In bazaar</th><th class="n">Inv</th><th class="n">Price</th><th>New price</th><th>Refill to</th><th class="stc">Status</th></tr>`
+      ? `<tr><th></th><th>Item</th><th class="n">In bazaar</th><th class="n">Inv</th><th class="n">Price</th><th>New price</th><th>Refill to</th><th class="stc">Status</th><th></th></tr>`
       : `<tr><th></th><th>Item</th><th class="n">In bazaar</th><th class="n opt">Inv</th><th class="n">Your price</th>
       <th class="n opt" title="Torn may cache Item Market prices for up to 1 hour">Lowest IM</th><th class="n opt">Lowest bazaar</th><th class="n opt">Avg bazaar</th><th class="n opt">Market</th>
       <th class="n">Suggested</th><th>Change price</th><th>Refill to</th><th>Status</th><th></th></tr>`;
@@ -948,7 +949,8 @@
           <td class="n">${it.bzQty || 0}</td><td class="n">${it.inv || 0}</td>
           <td class="n">${it.bzQty ? fmt(it.bzPrice) : '–'}</td>
           <td>${cpInput}${showSug ? ` <button class="sug" data-a="usesug" data-id="${it.id}" title="Use the suggested price">⇐ ${fmt(sug)}</button>` : ''}${uniq && !pl.price ? ' <span class="hint" title="Weapons/armor: quality and bonuses vary – set the price yourself">manual</span>' : ''}${lowTxt}</td>
-          <td>${refill}</td><td>${st}</td></tr>` + (openCard === it.id ? viewCard(it) : '');
+          <td>${refill}</td><td>${st}</td>
+          <td><a data-a="remove" data-id="${it.id}" title="Remove from bazaar and list">✕</a></td></tr>` + (openCard === it.id ? viewCard(it) : '');
         }
         return `<tr class="${cls}">${gear}${name}
           <td class="n">${it.bzQty || 0}</td><td class="n opt">${it.inv || 0}</td>
