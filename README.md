@@ -1,34 +1,39 @@
-# Toppzy Manager – bazaar manager for Torn
+# Shopkeeper – bazaar manager for Torn
 
-A Tampermonkey userscript that gives you a full overview of your bazaar, suggests prices and lets you **plan changes anywhere (even while flying)** and **apply them in Torn with one click**.
+A Tampermonkey userscript that gives you a full overview of your bazaar, suggests prices with an automatic safety floor and lets you **prepare changes anywhere (even while flying)** and **apply them in Torn with one click**.
 
-**Install:** open [toppzy-bazaar-manager.user.js](https://raw.githubusercontent.com/skur-commits/torn-scripts/main/toppzy-bazaar-manager.user.js) with Tampermonkey installed and press *Install*. Updates arrive automatically.
+**Install:** open [toppzy-bazaar-manager.user.js](https://raw.githubusercontent.com/skur-commits/torn-scripts/main/toppzy-bazaar-manager.user.js) with Tampermonkey installed and press *Install*. Updates arrive automatically. (In Tampermonkey the script is still called «Toppzy Manager» so your key and list are kept.)
 
 ## Getting started
 1. Create a Torn API key with level **Limited** (Settings → API Keys). Limited is needed to read your own bazaar.
 2. Click the 🏪 button in Torn's bottom bar (next to Notes) → 🔑 → paste the key.
 3. Your bazaar loads into **🏪 Bazaar list**. Everything you have ever had in your bazaar stays in the list – also when it is sold out (0). Add new items under **➕ Add from inventory** (Scan now, filter by category, sort by name / amount / value).
 
+## Simple and Advanced
+- **Simple** (default): only the main numbers – In bazaar, Inv, Price, New price (with the suggestion as a blue ⇐ button), Refill to and Status. On a phone the status is a coloured dot.
+- **Advanced**: also Lowest Item Market, Lowest / Avg bazaar, Market and Suggested.
+
 ## Buttons
 | Button | What it does |
 |---|---|
-| 📝 Planmode | Prepare everything (prices and refill amounts per item) – nothing happens in Torn until you apply |
-| ▶ Apply plan | Opens Manage / Add items / Personalize one at a time and fills everything in your plan. Then press the big green button in the panel (💾 SAVE CHANGES / ➕ ADD TO BAZAAR / ✔ CHANGE DETAILS) – one click presses Torn's own button once – or press Torn's button yourself (highlighted in yellow). The list updates itself afterwards. Not possible while traveling – your plan is kept |
-| 📦 Fill up | Refill the items in your list (amount from Settings: Fill all / Fill all −1 / All but N / %) |
-| 💲 Adjust prices | Only prices, from your price setting – also for empty items, so the refill is priced too (locked prices are never touched) |
+| ▶ Apply (N) | Opens Manage / Add items / Personalize one at a time and fills in all your changes. Then press the big green button in the panel (💾 SAVE CHANGES / ➕ ADD TO BAZAAR / ✔ CHANGE DETAILS) – one click presses Torn's own button once – or press Torn's button yourself (highlighted in yellow). The list updates itself afterwards. Not possible while traveling – your changes are kept |
+| 📦 Fill all | Refill all items in your list (amount from Settings: Everything in inventory / All −1 / All but N / %). Items where a shop pays more are skipped |
+| 💲 Adjust all prices | Suggested price on all items – also empty ones, so the refill is priced too (your own prices are never touched) |
+| Refill to + Max | How many you want in your bazaar **in total**. Max = everything you have. «+N» shows how many will be added |
 | 🔓 / 🔒 | Open or close your bazaar (Personalize page) |
-| ⚙ (per item) | Own price strategy and floor for one item + Reset to default |
-| ✕ (per item) | Empty item: removed from the list at once. Item for sale: asks, then removes it from your bazaar and the list |
-| ⟳ (top right) | Refresh prices – shows how long ago it was last done |
+| ⚙ (per item) | Own price strategy and floor for one item, Reset to default, Remove item |
+| ✕ (Advanced) | Empty item: removed from the list at once. Item for sale: asks, then removes it from your bazaar and the list |
+| ⟳ · ⚙ · 🔑 (top right) | Refresh prices · Settings · API key |
 
-Outside the bazaar pages (or while traveling) the quick buttons add to your plan. On the bazaar pages they fill in right away.
+Outside the bazaar pages (or while traveling) the buttons only prepare changes. On the bazaar pages they fill in right away.
 
-## Prices
+## Prices and floor
 - **Suggested** = cheapest seller (Item Market + bazaars) minus $1, by default ignoring the single cheapest listing and never below 90 % of market value (*Balanced*). Other presets: *Sell fast*, *Max profit*, *Custom*.
-- **Change price** = your own price (locked). **⇐** copies the suggestion.
-- **Floor** = never sell below. Automatic for items you have seen in a shop abroad, or set it per item.
+- **🔒 Floor** = never sell below. Automatic on every item: the highest of **85 % of the market value** (change it in Settings), **what Torn's shops pay** and **what you paid abroad**. Set your own floor per item with ⚙ (0 = no floor). Hover 🔒 to see which one applies.
+- **Sell to shop**: when a shop pays as much as the cheapest seller, the item gets a purple status – sell it in the shop yourself.
+- A price you type yourself below the floor turns red, and ▶ Apply asks you to confirm (or use the floor price) first.
 - Weapons and armor get no automatic price (quality and bonuses vary).
-- Before applying, the script warns you if the market moved since you planned.
+- Before applying, the script warns you if the market moved since you set the price.
 
 ## Safety
 - The script **only fills fields** – you always press *Save changes*, *Add to bazaar* or *change details* yourself.

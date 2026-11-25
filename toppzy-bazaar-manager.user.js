@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Toppzy Manager
 // @namespace    toppzy.torn
-// @version      0.3.3
-// @description  Bazaar manager for Torn: overview of everything in your bazaar (also sold-out items), price suggestions from Item Market + bazaars, plan changes anywhere (even while flying) and apply them in Torn with one click. Only fills fields – you always press Save / Add yourself.
+// @version      0.3.4
+// @description  Shopkeeper – bazaar manager for Torn: overview of everything in your bazaar (also sold-out items), price suggestions from Item Market + bazaars with an automatic safety floor (85 % of market, shop price, price paid abroad), prepare changes anywhere (even while flying) and apply them in Torn with one click. Only fills fields – you always press Save / Add yourself.
 // @author       Toppzy [4422625]
 // @match        https://www.torn.com/*
 // @match        https://torn.com/*
@@ -20,7 +20,7 @@
 (function () {
   'use strict';
   if (window.top !== window.self) return;
-  const VERSION = '0.3.3';
+  const VERSION = '0.3.4';
 
   /* =====================================================================
    *  SETTINGS
@@ -41,7 +41,9 @@
     cacheMin: 10,
     tornPerMin: 40,
     useWeav3r: true,
-    guardPct: 1             // price guard: warn if market moved more than this %
+    guardPct: 1,            // price guard: warn if market moved more than this %
+    safetyPct: 85,          // 0.3.4: automatic floor = this % of market value (0 = off)
+    view: 'simple'          // 0.3.4: simple | advanced
   }, PRESETS.balanced);
   const SRC = {
     lowestBoth: 'Cheapest seller anywhere (Item Market or bazaar)',
@@ -71,6 +73,10 @@
     items = {};
     const old = load('tracked', {});
     for (const id in old) { const t = old[id]; items[id] = { id, name: t.name, type: t.type, bzQty: t.bzQty || 0, bzPrice: t.bzPrice || 0, inv: t.inv || 0, soldOutAt: t.soldOutAt || 0, floor: t.floor > 0 ? t.floor : null, custom: null, plan: {} }; }
+  }
+  if (load('ver', '') !== '0.3.4') {                // 0.3.4: Refill qty means «refill to N in total» (was «add N»)
+    for (const id in items) { const p = items[id].plan; if (p && p.qty > 0) p.qty += items[id].bzQty || 0; }
+    save('items', items); save('ver', '0.3.4');
   }
   let prices = load('prices', {});        // id -> {t, imList, bzList, bzAvg, mv, bzOk}
   let abroad = load('abroad', {});        // id -> {cost, t}
@@ -212,12 +218,23 @@
     if (!m || !v) return v;
     return m[2] ? v * (1 + (+m[1]) / 100) : v + (+m[1]);
   }
-  function floorOf(it) {
-    if (!it) return 0;
-    if (it.floor === 0) return 0;                       // explicitly off
-    if (it.floor > 0) return it.floor;                  // manual
-    return (abroad[it.id] && abroad[it.id].cost) || 0;  // auto from abroad shop
+  // floor = never sell below. Manual per item (0 = off), else the highest of:
+  // safety % of market value · what Torn's shops pay (sell price) · price paid abroad
+  const mvOf = it => ((invValues[it.id] && invValues[it.id].mp) || (prices[it.id] && (prices[it.id].mv || prices[it.id].bzAvg)) || 0);
+  const shopOf = it => (invValues[it.id] && invValues[it.id].sell) || 0;
+  function floorInfo(it) {
+    if (!it) return { v: 0, why: '' };
+    if (it.floor === 0) return { v: 0, why: 'off' };
+    if (it.floor > 0) return { v: it.floor, why: 'manual' };
+    const c = [];
+    const pct = +cfg.safetyPct || 0, mv = mvOf(it);
+    if (pct && mv && !isUnique(it)) c.push({ v: Math.round(mv * pct / 100), why: `${pct} % of market` });
+    if (shopOf(it)) c.push({ v: shopOf(it), why: 'shop price' });
+    if (abroad[it.id] && abroad[it.id].cost) c.push({ v: abroad[it.id].cost, why: 'bought abroad' });
+    return c.reduce((a, b) => b.v > a.v ? b : a, { v: 0, why: '' });
   }
+  const floorOf = it => floorInfo(it).v;
+  const lowPrice = it => { const pl = it.plan || {}, f = floorOf(it); return !!(pl.price && f && pl.price < f); };
   function suggest(it, p) {
     if (!p || isUnique(it)) return 0;
     const s = strategyOf(it);
@@ -231,6 +248,8 @@
   function status(it) {
     const p = prices[it.id];
     if (it.bzQty > 0 && bazaar && bazaar.open === false) return { k: 'closed', txt: 'Bazaar closed', col: '#999' };
+    const shop = shopOf(it), lo0 = lowestOther(p);
+    if (!isUnique(it) && shop && lo0 && lo0 <= shop && (it.bzQty > 0 || it.inv > 0)) return { k: 'shop', txt: `Sell to shop ${fmt(shop)}`, col: '#b48ae0' };
     if (!it.bzQty) return { k: 'sold', txt: 'Sold out' + (it.inv > 0 ? ` · ${it.inv} in inv` : '') + (it.soldOutAt ? ` · ${ago(it.soldOutAt)}` : ''), col: '#3d85c6' };
     if (isUnique(it)) return { k: 'ok', txt: 'Manual price', col: '#999' };
     const lo = lowestOther(p);
@@ -243,12 +262,14 @@
    *  PLAN
    * ===================================================================*/
   const P = it => (it.plan = it.plan || {});
+  // Refill to N = N in the bazaar in total → how many to add now
+  const addOf = (it, have) => { const pl = it.plan || {}; if (!(pl.qty > 0)) return 0; const h = have == null ? (it.inv || 0) : have; return Math.max(0, Math.min(pl.qty - (it.bzQty || 0), h)); };
   function planCounts() {
     let price = 0, qty = 0, rem = 0, priceOut = 0, priceNoQty = 0;
     for (const id in items) {
       const it = items[id], p = it.plan || {};
-      if (p.price) { price++; if (it.bzQty > 0) priceOut++; else if (!(p.qty > 0)) priceNoQty++; }
-      if (p.qty > 0) qty++; if (p.remove) rem++;
+      if (p.price) { price++; if (it.bzQty > 0) priceOut++; else if (!(addOf(it) > 0)) priceNoQty++; }
+      if (addOf(it) > 0) qty++; if (p.remove) rem++;
     }
     return { price, qty, rem, priceOut, priceNoQty, bz: planBazaar ? 1 : 0, total: price + qty + rem + (planBazaar ? 1 : 0) };
   }
@@ -258,14 +279,14 @@
     p.price = Math.round(v); p.locked = !!locked; p.priceRef = lowestOther(prices[it.id]) || 0; p.t = Date.now();
   }
   function qtyFor(have, it) {
-    if (it && it.plan && it.plan.qty > 0) return Math.min(it.plan.qty, have || it.plan.qty);
+    if (it && it.plan && it.plan.qty > 0) return addOf(it, have);
     if (cfg.qtyMode === 'minus1') return have - 1;
     if (cfg.qtyMode === 'leave') return have - (+cfg.leaveQty || 0);
     if (cfg.qtyMode === 'pct') return Math.floor(have * (+cfg.pctQty || 0) / 100);
     return have;
   }
   function fillScope() {
-    return Object.values(items).filter(it => !isNever(it.name) && !(it.plan && it.plan.remove));
+    return Object.values(items).filter(it => !isNever(it.name) && !(it.plan && it.plan.remove) && status(it).k !== 'shop');
   }
 
   /* =====================================================================
@@ -292,7 +313,9 @@
     setStatus(`Loading inventory (${cats.length} categories) …`);
     const inv = await fetchInventory(cats);
     for (const id in items) items[id].inv = inv[id] ? inv[id].amount : 0;
-    if (scanAll) { invAll = inv; setStatus('Loading market values …'); await fetchInvValues(Object.keys(inv)); }
+    setStatus('Loading market values and shop prices …');
+    await fetchInvValues([...new Set([...Object.keys(items), ...(scanAll ? Object.keys(inv) : [])])]);
+    if (scanAll) invAll = inv;
     const ids = Object.keys(items); let i = 0;
     for (const id of ids) { i++; setStatus(`Prices ${i}/${ids.length} …`); await fetchPrice(id, force); }
     lastRun = Date.now(); save('lastAuto', Date.now()); setStatus('');
@@ -412,7 +435,7 @@
       return { id, li, qty, box, hasPrice, name, have };
     }).filter(Boolean);
   }
-  // mode: 'plan' (plan.qty items) | 'fill' (Fill up settings)
+  // mode: 'plan' (pending refills) | 'fill' (Fill all settings)
   let addFilled = [];
   function applyAddFilled() {           // after ADD TO BAZAAR: count the added items as in the bazaar right away
     for (const f of addFilled) {
@@ -430,10 +453,11 @@
       const it = items[r.id] || { id: r.id, name: r.name, type: '', floor: null, plan: {} };
       if (isNever(it.name || r.name)) continue;
       let q;
-      if (mode === 'plan') { if (!(it.plan && it.plan.qty > 0)) continue; q = Math.min(it.plan.qty, r.have); }
+      if (mode === 'plan') { if (!(it.plan && it.plan.qty > 0)) continue; q = addOf(it, r.have); }
       else {
-        if (!items[r.id]) continue;                         // Fill up = only items in my list
+        if (!items[r.id]) continue;                         // Fill all = only items in my list
         if (it.plan && it.plan.remove) continue;
+        if (status(it).k === 'shop' && !(it.plan && it.plan.qty > 0)) continue;   // a shop pays more – sell it there
         q = qtyFor(r.have, it);
       }
       if (!(q > 0)) { skipped++; continue; }
@@ -499,7 +523,7 @@
     }
     return n;
   }
-  // 💲 Adjust prices only
+  // 💲 Adjust all prices
   async function actAdjust() {
     if (!key) return askKey();
     if (pageMode() === 'manage') {
@@ -507,13 +531,13 @@
       const { n } = fillManage('adjust');
       const e = planPrices(true); persist(); render();
       hookSave(/save changes/i, () => { });
-      return toast((n ? `${n} prices filled – ${SAVE_TXT.manage}.` : 'All prices on this page are already right.') + (e ? ` ${e} empty items got a planned price.` : ''));
+      return toast((n ? `${n} prices filled – ${SAVE_TXT.manage}.` : 'All prices on this page are already right.') + (e ? ` ${e} empty items got a new price.` : ''));
     }
     const n = planPrices(false);
     persist(); render();
-    toast(n ? `${n} prices added to the plan – press ▶ Apply plan when you are in Torn.` : 'No price changes needed.');
+    toast(n ? `${n} price changes ready – press ▶ Apply when you're in Torn.` : 'No price changes needed.');
   }
-  // 📦 Fill up all items
+  // 📦 Fill all items
   async function actFill() {
     if (!key) return askKey();
     if (pageMode() === 'add') {
@@ -524,27 +548,32 @@
     let n = 0;
     for (const it of fillScope()) {
       const q = qtyFor(it.inv || 0, Object.assign({}, it, { plan: {} }));
-      if (q > 0) { P(it).qty = q; n++; }
+      if (q > 0) { P(it).qty = (it.bzQty || 0) + q; n++; }
     }
     persist(); render();
-    toast(n ? `${n} refills added to the plan – press ▶ Apply plan when you are in Torn.` : 'Nothing in your inventory to fill up with.');
+    toast(n ? `${n} refills ready – press ▶ Apply when you're in Torn.` : 'Nothing in your inventory to fill with.');
   }
-  // ▶ Apply plan
+  // ▶ Apply
   async function isTraveling() {
     if (/unavailable while you('|’)re traveling/i.test(document.body.innerText || '')) return true;
     try { const j = await torn('user/basic', 'Your status'); const st = ((j.profile || {}).status || {}).state || ''; return /travel|abroad/i.test(st); } catch (e) { return false; }
   }
-  const TRAVEL_MSG = "You're traveling – your plan is saved. Apply it when you're back in Torn.";
-  async function actApply() {
+  const TRAVEL_MSG = "You're traveling – your changes are saved. Apply them when you're back in Torn.";
+  async function actApply(lowOk) {
     const c = planCounts();
-    if (!c.total) return toast('The plan is empty.');
+    if (!c.total) return toast('No changes to apply.');
     if (!key) return askKey();
+    if (!lowOk) {                                   // price below floor → confirm first (one click in the panel, nothing in Torn)
+      const low = Object.values(items).filter(it => lowPrice(it) && !(it.plan && it.plan.remove));
+      if (low.length) { lowState = { items: low }; guardState = null; openPanel(); return; }
+    }
+    lowState = null;
     if (await isTraveling()) return toast(TRAVEL_MSG, true);
     const steps = [];
     if (c.priceOut || c.rem) steps.push('manage');          // prices on items for sale + removals
     if (c.qty) steps.push('add');                            // refills (empty items use their planned price here)
     if (c.bz) steps.push('personalize');
-    const warn = c.priceNoQty ? `${c.priceNoQty} empty item${c.priceNoQty > 1 ? 's have' : ' has'} a price but no refill amount – press 📦 Fill up or set Refill qty in Planmode.` : '';
+    const warn = c.priceNoQty ? `${c.priceNoQty} empty item${c.priceNoQty > 1 ? 's have' : ' has'} a price but no refill amount – press 📦 Fill all or set Refill to.` : '';
     if (!steps.length) return toast(warn || 'Nothing to apply.', true);
     if (warn) toast(warn, true);
     applyNote = warn;
@@ -652,7 +681,7 @@
     P(it).remove = true; delete it.plan.price; delete it.plan.qty;
     persist();
     if (pageMode() === 'manage') { const { r } = fillManage('plan'); hookSave(/save changes/i, () => { });  toast(r ? `Remove field filled – ${SAVE_TXT.manage}.` : 'Could not find the item on this page.'); }
-    else toast(`${it.name} will be removed when you press ▶ Apply plan.`);
+    else toast(`${it.name} will be removed when you press ▶ Apply.`);
     render();
   }
 
@@ -667,7 +696,7 @@
   #tbm-btn .tbm-badge{position:absolute;top:-6px;right:-6px;background:#cc0000;color:#fff;border:1.5px solid #fff;border-radius:9px;font:bold 10px/13px Arial;padding:0 4px;min-width:14px;text-align:center;display:none;z-index:2}
   #tbm-btn.tbm-float{position:fixed;right:14px;bottom:130px;z-index:999999;width:44px;height:44px;border-radius:50%;border:2px solid #fff;cursor:pointer;box-shadow:0 2px 10px #000a;display:flex;align-items:center;justify-content:center}
   #tbm{position:fixed;right:8px;bottom:46px;z-index:999999;width:960px;max-width:calc(100vw - 16px);max-height:calc(100vh - 110px);display:none;flex-direction:column;background:#1b1b1b;color:#ddd;font:12px/1.35 Arial,sans-serif;border:2px solid #6aa84f;border-radius:8px;box-shadow:0 6px 20px #000c;text-align:left}
-  #tbm.tbm-floatpos{bottom:185px}
+  #tbm.tbm-floatpos{bottom:185px;max-height:calc(100vh - 200px)}
   #tbm *{box-sizing:border-box}
   #tbm header{display:flex;align-items:center;gap:6px;padding:7px 9px;border-bottom:1px solid #333;flex-wrap:wrap}
   #tbm header .ttl{font-size:14px;color:#fff;font-weight:bold}
@@ -727,14 +756,27 @@
   #tbm .msg{color:#ffd966}
   #tbm .msg.err{color:#ea9999}
   #tbm .modal td{background:#2a2400 !important}
+  #tbm .seg{display:inline-flex;border:1px solid #555;border-radius:4px;overflow:hidden}
+  #tbm .seg button{border:0 !important;border-radius:0}
+  #tbm .seg button.on{box-shadow:none}
+  #tbm button.ico{padding:4px 7px}
+  #tbm .sug{border:1px solid #3d85c6 !important;background:#0b2a4a !important;color:#9fc5e8 !important;border-radius:3px;padding:2px 6px !important;font-size:11px !important}
+  #tbm .max{padding:2px 6px !important;font-size:11px !important}
+  #tbm .add{color:#b6d7a8;font-size:11px;margin-left:3px}
+  #tbm input.cp.low{border-color:#e06666 !important;color:#ea9999 !important}
+  #tbm .lowtxt{color:#ea9999;font-size:11px}
+  #tbm .lock{cursor:help}
   @media (max-width:700px){
     #tbm{right:4px;left:4px;width:auto;max-width:none;bottom:50px;max-height:calc(100vh - 90px)}
     #tbm .opt{display:none}
     #tbm button{padding:7px 9px;font-size:13px}
     #tbm input.cp{width:78px}
     #tbm header .ad{width:100%;order:9}
+    #tbm table.simple .st{font-size:0;width:12px;height:12px;padding:0;border-radius:50%}
+    #tbm table.simple th.stc{font-size:0}
+    #tbm table.simple .add{display:block;margin:0}
   }`;
-  let tab = 'items', filter = 'all', msg = '', msgErr = false, planMode = false, openCard = null, guardState = null;
+  let tab = 'items', lastTab = 'items', filter = 'all', msg = '', msgErr = false, openCard = null, guardState = null, lowState = null;
 
   const ICON = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 9l1.5-5h15L21 9"/><path d="M3 9h18v1.5a2.5 2.5 0 0 1-4.5 1.5 2.5 2.5 0 0 1-4.5 0 2.5 2.5 0 0 1-4.5 0A2.5 2.5 0 0 1 3 10.5z"/><path d="M5 13v7h14v-7"/><path d="M10 20v-4h4v4"/></svg>`;
 
@@ -747,7 +789,7 @@
     if (ref && (!b || b.classList.contains('tbm-float') || !b.isConnected)) {
       if (b) b.remove();
       b = document.createElement('button');
-      b.type = 'button'; b.id = 'tbm-btn'; b.title = 'Toppzy Manager';
+      b.type = 'button'; b.id = 'tbm-btn'; b.title = 'Shopkeeper';
       b.className = ref.className;                                       // borrow Torn's style at runtime
       b.innerHTML = ICON + '<span class="tbm-badge"></span>';
       const svg = ref.querySelector('svg'); if (svg && svg.getAttribute('class')) b.querySelector('svg').setAttribute('class', svg.getAttribute('class'));
@@ -755,7 +797,7 @@
       b.onclick = togglePanel;
       document.getElementById('tbm').classList.remove('tbm-floatpos');
     } else if (!ref && !b) {
-      b = document.createElement('button'); b.type = 'button'; b.id = 'tbm-btn'; b.title = 'Toppzy Manager';
+      b = document.createElement('button'); b.type = 'button'; b.id = 'tbm-btn'; b.title = 'Shopkeeper';
       b.className = 'tbm-float'; b.innerHTML = ICON + '<span class="tbm-badge"></span>';
       document.body.appendChild(b); b.onclick = togglePanel;
       document.getElementById('tbm').classList.add('tbm-floatpos');
@@ -771,7 +813,7 @@
   function setStatus(s) { msg = s; msgErr = false; const e = document.getElementById('tbm-msg'); if (e) { e.textContent = s; e.className = 'msg'; } }
   function toast(s, err) { msg = s; msgErr = !!err; const e = document.getElementById('tbm-msg'); if (e) { e.textContent = s; e.className = 'msg' + (err ? ' err' : ''); } }
   function badge() {
-    const n = Object.values(items).filter(it => ['under', 'sold'].includes(status(it).k)).length;
+    const n = Object.values(items).filter(it => ['under', 'sold', 'shop'].includes(status(it).k)).length;
     const e = document.querySelector('#tbm-btn .tbm-badge'); if (e) { e.textContent = n; e.style.display = n ? 'block' : 'none'; }
   }
   function askKey() {
@@ -787,44 +829,47 @@
     if (w.style.display !== 'flex') return;
     const all = Object.values(items);
     const value = all.reduce((s, t) => s + (t.bzQty || 0) * (t.bzPrice || 0), 0);
-    const c = planCounts(), mode = pageMode();
+    const c = planCounts(), mode = pageMode(), simple = cfg.view !== 'advanced';
     const forSale = all.filter(t => t.bzQty > 0).length, empty = all.length - forSale;
     const bz = bazaar.open == null ? '' : bazaar.open ? '<span class="bz" style="background:#6aa84f">🟢 Open</span>' : '<span class="bz" style="background:#e06666">🔴 Closed</span>';
     const oldBody = w.querySelector('.body.main'), keep = oldBody ? { t: oldBody.scrollTop, l: oldBody.scrollLeft, tab: w.dataset.tab } : null;
     const stepName = { manage: 'prices & removals (Manage)', add: 'refill (Add items)', personalize: 'open/close (Personalize)' };
+    const bzBtns = simple
+      ? (bazaar.open === false ? '<button data-a="bzopen" title="Go to Personalize and choose Open – you press «change details»">🔓 Open bazaar</button>' : '<button data-a="bzclose" title="Go to Personalize and choose Closed – you press «change details»">🔒 Close bazaar</button>')
+      : `<button data-a="bzopen" title="Go to Personalize and choose Open – you press «change details»">🔓 Open bazaar</button>
+        <button data-a="bzclose" title="Go to Personalize and choose Closed – you press «change details»">🔒 Close bazaar</button>`;
     w.innerHTML = `
       <header>
-        <span class="ttl">🏪 Toppzy Manager</span><span class="ver">v${VERSION}</span>
+        <span class="ttl">🏪 Shopkeeper</span><span class="ver">v${VERSION}</span>
         <span class="ad">· Like the script? Send a Xanax to <a href="https://www.torn.com/profiles.php?XID=4422625" target="_blank">Toppzy [4422625]</a></span>
+        <span class="seg"><button data-a="view" data-v="simple" class="${simple ? 'on' : ''}" title="Only the main numbers">Simple</button><button data-a="view" data-v="advanced" class="${simple ? '' : 'on'}" title="All prices and details">Advanced</button></span>
         ${bz}
         <button data-a="refresh" class="rf" title="Refresh prices – reloads your bazaar, inventory and fresh Item Market + bazaar prices for every item in your bazaar list"><span class="rfi">⟳</span> ${ago(lastRun)}</button>
-        <button data-a="key" title="API key">🔑</button><button data-a="close" title="Close">✕</button>
+        <button data-a="settings" class="ico ${tab === 'set' ? 'on' : ''}" title="Settings">⚙</button><button data-a="key" class="ico" title="API key">🔑</button><button data-a="close" class="ico" title="Close">✕</button>
       </header>
       <div class="bar">
-        <button data-a="plan" class="${planMode ? 'on' : ''}" title="Planmode: set refill amounts per item. Nothing happens in Torn until you press Apply plan.">📝 Planmode${planMode ? ' (on)' : ''}</button>
-        <button data-a="apply" class="g" ${c.total ? '' : 'disabled'} title="Open the right bazaar page and fill in everything in your plan. You press Save / Add yourself.">▶ Apply plan${c.total ? ` (${c.total})` : ''}</button>
-        <button data-a="fill" class="bl" title="${mode === 'add' ? 'Fill quantities and prices on this page now' : 'Add a refill of your items to the plan'}">📦 Fill up${mode === 'add' ? ' now' : ''}</button>
-        <button data-a="adjust" class="bl" title="${mode === 'manage' ? 'Fill suggested prices on this page now' : 'Add suggested prices to the plan'}">💲 Adjust prices${mode === 'manage' ? ' now' : ''}</button>
+        <button data-a="apply" class="g" ${c.total ? '' : 'disabled'} title="Open the right bazaar page and fill in all your changes. You press Save / Add yourself.">▶ Apply${c.total ? ` (${c.total})` : ''}</button>
+        <button data-a="fill" class="bl" title="${mode === 'add' ? 'Fill amounts and prices for all items on this page now' : 'Refill all items in your bazaar list (amount from Settings)'}">📦 Fill all${mode === 'add' ? ' now' : ''}</button>
+        <button data-a="adjust" class="bl" title="${mode === 'manage' ? 'Fill suggested prices for all items on this page now' : 'Suggested price on all items (your own prices are kept)'}">💲 Adjust all prices${mode === 'manage' ? ' now' : ''}</button>
         <span class="sp"></span>
-        <button data-a="bzopen" title="Go to Personalize and choose Open – you press «change details»">🔓 Open bazaar</button>
-        <button data-a="bzclose" title="Go to Personalize and choose Closed – you press «change details»">🔒 Close bazaar</button>
+        ${bzBtns}
       </div>
-      ${flow ? `<div class="flow">▶ Applying plan – step ${flow.i + 1} of ${flow.steps.length}: <b>${stepName[flow.steps[flow.i]]}</b>
+      ${flow ? `<div class="flow">▶ Applying changes – step ${flow.i + 1} of ${flow.steps.length}: <b>${stepName[flow.steps[flow.i]]}</b>
         ${mode === flow.steps[flow.i] ? (pendingSave === mode ? `<button data-a="tornsave" class="g big" title="Presses Torn's own ${SAVE_BTN[mode].replace(/^\S+\s/, '')} button once">${SAVE_BTN[mode]}</button><span class="hint">(or ${SAVE_TXT[mode]})</span>` : `<span>– ${SAVE_TXT[flow.steps[flow.i]]}.</span>`) : `<button data-a="next" class="y">Go to step ${flow.i + 1}</button>`}
         <button data-a="cancelflow">Cancel</button></div>` : (pendingSave && pendingSave === mode ? `<div class="flow">Ready on this page: <button data-a="tornsave" class="g big" title="Presses Torn's own button once">${SAVE_BTN[mode]}</button><span class="hint">(or ${SAVE_TXT[mode]})</span></div>` : '')}
+      ${lowState ? viewLow() : ''}
       ${guardState ? viewGuard() : ''}
       <div class="bar">
         <button data-tab="items" class="${tab === 'items' ? 'on' : ''}" title="The items in your bazaar list – also the ones at 0">🏪 Bazaar list (${all.length})</button>
         <button data-tab="inv" class="${tab === 'inv' ? 'on' : ''}" title="Add new items from your inventory to your bazaar list">➕ Add from inventory</button>
-        <button data-tab="set" class="${tab === 'set' ? 'on' : ''}">⚙ Settings</button>
         ${tab === 'items' ? `<span class="sp hint">Show:</span>
           <button data-f="all" class="${filter === 'all' ? 'on' : ''}">All (${all.length})</button>
           <button data-f="sale" class="${filter === 'sale' ? 'on' : ''}">For sale (${forSale})</button>
-          <button data-f="empty" class="${filter === 'empty' ? 'on' : ''}">Empty (${empty})</button>` : ''}
+          <button data-f="empty" class="${filter === 'empty' ? 'on' : ''}">Empty (${empty})</button>` : tab === 'set' ? '<span class="sp hint">⚙ Settings – press ⚙ again to go back</span>' : ''}
       </div>
       <div class="body main">${tab === 'items' ? viewItems() : tab === 'inv' ? viewInv() : viewSet()}</div>
       <div class="foot"><span>In bazaar: <b style="color:#fff">${fmt(value)}</b></span>
-        ${c.total ? `<span>Plan: ${[c.price && c.price + ' prices', c.qty && c.qty + ' refills', c.rem && c.rem + ' removals', c.bz && 'bazaar ' + planBazaar].filter(Boolean).join(' · ')} · <a data-a="clearplan">clear plan</a></span>` : ''}
+        ${c.total ? `<span>Pending: ${[c.price && c.price + ' price' + (c.price > 1 ? 's' : ''), c.qty && c.qty + ' refill' + (c.qty > 1 ? 's' : ''), c.rem && c.rem + ' removal' + (c.rem > 1 ? 's' : ''), c.bz && 'bazaar ' + planBazaar].filter(Boolean).join(' · ')} · <a data-a="clearplan">clear changes</a></span>` : ''}
         <span id="tbm-msg" class="msg${msgErr ? ' err' : ''}">${esc(msg)}</span></div>`;
     const nb = w.querySelector('.body.main');
     if (keep && keep.tab === tab && nb) { nb.scrollTop = keep.t; nb.scrollLeft = keep.l; }
@@ -833,7 +878,7 @@
   }
 
   function wire(w) {
-    w.querySelectorAll('[data-tab]').forEach(e => e.onclick = () => { tab = e.dataset.tab; render(); });
+    w.querySelectorAll('[data-tab]').forEach(e => e.onclick = () => { tab = e.dataset.tab; lastTab = tab; render(); });
     w.querySelectorAll('[data-f]').forEach(e => e.onclick = () => { filter = e.dataset.f; render(); });
     w.querySelectorAll('[data-a]').forEach(e => { if (e.tagName !== 'SELECT') e.onclick = ev => { ev.preventDefault(); act(e.dataset.a, e); }; });
     w.querySelectorAll('input.cp').forEach(e => e.onchange = () => { const it = items[e.dataset.id]; if (!it) return; setPlanPrice(it, num(e.value), true); persist(); render(); });
@@ -844,6 +889,7 @@
       if (typeof DEF[k] === 'number') v = num(v);
       cfg[k] = v;
       if (['priceSource', 'priceDelta', 'skipLowest', 'minPctOfMV'].includes(k)) cfg.preset = 'custom';
+      if (k === 'safetyPct') cfg.safetyPct = Math.max(0, Math.min(100, cfg.safetyPct));
       save('cfg', cfg); savedTick(); render();
     });
     w.querySelectorAll('[data-card]').forEach(e => e.onchange = () => {
@@ -871,28 +917,49 @@
     let list = Object.values(items);
     if (filter === 'sale') list = list.filter(t => t.bzQty > 0);
     if (filter === 'empty') list = list.filter(t => !t.bzQty);
-    const order = { sold: 0, under: 1, ok: 2 };
-    list.sort((a, b) => order[status(a).k] - order[status(b).k] || (a.name || '').localeCompare(b.name || ''));
+    const order = { sold: 0, shop: 1, under: 2 };
+    const ord = it => { const k = status(it).k; return k in order ? order[k] : 3; };
+    list.sort((a, b) => ord(a) - ord(b) || (a.name || '').localeCompare(b.name || ''));
     if (!list.length) return '<p>No items here – press ⟳ to load your bazaar, or add items under ➕ Add from inventory.</p>';
-    return `<table><tr><th></th><th>Item</th><th class="n">In bazaar</th><th class="n opt">Inv</th><th class="n">Your price</th>
+    const simple = cfg.view !== 'advanced';
+    const head = simple
+      ? `<tr><th></th><th>Item</th><th class="n">In bazaar</th><th class="n">Inv</th><th class="n">Price</th><th>New price</th><th>Refill to</th><th class="stc">Status</th></tr>`
+      : `<tr><th></th><th>Item</th><th class="n">In bazaar</th><th class="n opt">Inv</th><th class="n">Your price</th>
       <th class="n opt" title="Torn may cache Item Market prices for up to 1 hour">Lowest IM</th><th class="n opt">Lowest bazaar</th><th class="n opt">Avg bazaar</th><th class="n opt">Market</th>
-      <th class="n">Suggested</th><th>Change price</th>${planMode ? '<th class="n">Refill qty</th>' : ''}<th>Status</th><th></th></tr>` +
+      <th class="n">Suggested</th><th>Change price</th><th>Refill to</th><th>Status</th><th></th></tr>`;
+    return `<table class="${simple ? 'simple' : 'adv'}">${head}` +
       list.map(it => {
         const p = prices[it.id] || {}, s = status(it), pl = it.plan || {}, sug = suggest(it, prices[it.id]);
-        const f = floorOf(it), uniq = isUnique(it);
+        const fi = floorInfo(it), uniq = isUnique(it), low = lowPrice(it);
         const cls = pl.remove ? 'removing' : (pl.price || pl.qty) ? 'planned' : '';
-        return `<tr class="${cls}">
-          <td><a class="gear ${it.custom || it.floor != null ? 'custom' : ''}" data-a="card" data-id="${it.id}" title="Settings for this item">⚙</a></td>
-          <td><a href="https://www.torn.com/page.php?sid=ItemMarket#/market/view=search&itemID=${it.id}" target="_blank">${esc(it.name || it.id)}</a>${f ? ` <span title="Floor ${fmt(f)}${it.floor > 0 ? ' (manual)' : ' (bought abroad)'}">🔒</span>` : ''}${it.custom ? ' <span class="hint" title="Own price strategy">★</span>' : ''}</td>
+        const gear = `<td><a class="gear ${it.custom || it.floor != null ? 'custom' : ''}" data-a="card" data-id="${it.id}" title="Settings for this item">⚙</a></td>`;
+        const name = `<td><a href="https://www.torn.com/page.php?sid=ItemMarket#/market/view=search&itemID=${it.id}" target="_blank">${esc(it.name || it.id)}</a>${fi.v ? ` <span class="lock" title="Floor ${fmt(fi.v)} – ${fi.why}. Suggested prices never go below this.">🔒</span>` : ''}${!simple && it.custom ? ' <span class="hint" title="Own price strategy">★</span>' : ''}</td>`;
+        const lowTxt = low ? `<div class="lowtxt">below floor ${fmt(fi.v)} (${fi.why})</div>` : '';
+        const cpInput = `<input class="cp ${pl.price ? 'set' : ''} ${low ? 'low' : ''}" data-id="${it.id}" value="${pl.price ? pl.price.toLocaleString('en-US') : ''}" placeholder="new price">${pl.price ? ` <button class="mini" data-a="undo" data-id="${it.id}" title="Undo">↺</button>` : ''}`;
+        // Refill to N = N in the bazaar in total
+        const add = addOf(it), hasQ = pl.qty > 0;
+        const refill = (it.inv > 0 || hasQ)
+          ? `<input class="pq" data-id="${it.id}" value="${hasQ ? pl.qty : ''}" placeholder="${it.bzQty || 0}" title="How many you want in your bazaar in total" style="${hasQ ? 'border-color:#6aa84f;color:#b6d7a8' : ''}"> <button class="max" data-a="max" data-id="${it.id}" title="All you have: ${(it.bzQty || 0) + (it.inv || 0)} in total">Max</button>${hasQ ? `<span class="add">+${add}</span>` : ''}${s.k === 'shop' ? '<div class="hint">shop pays more</div>' : ''}`
+          : `<span class="hint">${s.k === 'shop' ? 'shop pays more' : 'none in inv'}</span>`;
+        const st = `<span class="st" style="background:${pl.remove ? '#e06666' : s.col}" title="${esc(pl.remove ? 'Removing' : s.txt)}">${pl.remove ? 'Removing' : esc(s.txt)}</span>`;
+        if (simple) {
+          const showSug = !pl.price && !uniq && s.k !== 'shop' && sug && sug !== (it.bzQty ? it.bzPrice : 0);
+          return `<tr class="${cls}">${gear}${name}
+          <td class="n">${it.bzQty || 0}</td><td class="n">${it.inv || 0}</td>
+          <td class="n">${it.bzQty ? fmt(it.bzPrice) : '–'}</td>
+          <td>${cpInput}${showSug ? ` <button class="sug" data-a="usesug" data-id="${it.id}" title="Use the suggested price">⇐ ${fmt(sug)}</button>` : ''}${uniq && !pl.price ? ' <span class="hint" title="Weapons/armor: quality and bonuses vary – set the price yourself">manual</span>' : ''}${lowTxt}</td>
+          <td>${refill}</td><td>${st}</td></tr>` + (openCard === it.id ? viewCard(it) : '');
+        }
+        return `<tr class="${cls}">${gear}${name}
           <td class="n">${it.bzQty || 0}</td><td class="n opt">${it.inv || 0}</td>
           <td class="n">${it.bzQty ? fmt(it.bzPrice) : '–'}</td>
           <td class="n opt" title="Checked ${ago(p.t)} (Torn may cache up to 1 h)">${fmt(nth(p.imList, 0))}${p.t ? `<div class="hint">${ago(p.t)}</div>` : ''}</td>
           <td class="n opt">${p.t && cfg.useWeav3r && p.bzOk === false ? '<span class="hint" title="weav3r.dev did not answer – Item Market only">n/a</span>' : fmt(nth(p.bzList, 0))}</td>
-          <td class="n opt">${fmt(p.bzAvg)}</td><td class="n opt">${fmt(p.mv)}</td>
+          <td class="n opt">${fmt(p.bzAvg)}</td><td class="n opt">${fmt(mvOf(it))}</td>
           <td class="n">${uniq ? '<span class="hint" title="Weapons/armor: quality and bonuses vary – set the price yourself">manual</span>' : `<b style="color:#fff">${fmt(sug)}</b>${sug ? ` <button class="mini" data-a="usesug" data-id="${it.id}" title="Copy suggested into Change price">⇐</button>` : ''}`}</td>
-          <td><input class="cp ${pl.price ? 'set' : ''}" data-id="${it.id}" value="${pl.price ? pl.price.toLocaleString('en-US') : ''}" placeholder="new price">${pl.price ? ` <button class="mini" data-a="undo" data-id="${it.id}" title="Undo">↺</button><div class="hint">${it.bzQty ? `${fmt(it.bzPrice)} → ${fmt(pl.price)}` : `new: ${fmt(pl.price)}${pl.qty ? ' × ' + pl.qty : ''}`}${pl.locked ? '' : ' (auto)'}</div>` : ''}</td>
-          ${planMode ? `<td class="n"><input class="pq" data-id="${it.id}" value="${pl.qty || ''}" placeholder="${it.inv || 0}"></td>` : ''}
-          <td><span class="st" style="background:${pl.remove ? '#e06666' : s.col}">${pl.remove ? 'Removing' : esc(s.txt)}</span>${pl.qty ? ` <span class="hint">+${pl.qty} planned</span>` : ''}</td>
+          <td>${cpInput}${pl.price ? `<div class="hint">${it.bzQty ? `${fmt(it.bzPrice)} → ${fmt(pl.price)}` : `new: ${fmt(pl.price)}${add ? ' × ' + add : ''}`}${pl.locked ? '' : ' (auto)'}</div>` : ''}${lowTxt}</td>
+          <td>${refill}</td>
+          <td>${st}</td>
           <td><a data-a="remove" data-id="${it.id}" title="Remove from bazaar and list">✕</a></td></tr>` +
           (openCard === it.id ? viewCard(it) : '');
       }).join('') + '</table>';
@@ -901,7 +968,8 @@
   function viewCard(it) {
     const s = it.custom, cur = s ? (s.name || 'custom') : 'default', auto = abroad[it.id];
     const opt = (v, l) => `<option value="${v}" ${cur === v ? 'selected' : ''}>${l}</option>`;
-    return `<tr class="card"><td colspan="${planMode ? 14 : 13}">
+    const fa = floorInfo(Object.assign({}, it, { floor: null }));
+    return `<tr class="card"><td colspan="20">
       <div class="grid">
         <div><label>Price strategy for ${esc(it.name)}</label><select data-card="strategy" data-id="${it.id}">
           ${opt('default', 'Use default (Settings)')}${opt('fast', '🏃 Sell fast')}${opt('balanced', '⚖️ Balanced')}${opt('profit', '💰 Max profit')}${opt('custom', '✏️ Custom')}</select></div>
@@ -910,21 +978,33 @@
           <div><label>Change ($ or %)</label><input data-card="priceDelta" data-id="${it.id}" value="${esc(s.priceDelta)}" style="width:60px"></div>
           <div><label>Ignore cheapest</label><input data-card="skipLowest" data-id="${it.id}" value="${s.skipLowest}" style="width:40px"></div>
           <div><label>Never below % of market</label><input data-card="minPctOfMV" data-id="${it.id}" value="${s.minPctOfMV}" style="width:45px"></div>` : ''}
-        <div><label>Floor – never sell below <span class="info" title="Empty = automatic (price you paid abroad, if known). 0 = no floor.">ⓘ</span></label>
-          <input data-card="floor" data-id="${it.id}" value="${it.floor != null ? it.floor : ''}" placeholder="${auto ? 'auto ' + fmt(auto.cost) : 'none'}" style="width:100px"></div>
+        <div><label>Floor – never sell below <span class="info" title="Empty = automatic: the highest of ${+cfg.safetyPct || 0} % of market value, the shop price and the price you paid abroad. 0 = no floor.">ⓘ</span></label>
+          <input data-card="floor" data-id="${it.id}" value="${it.floor != null ? it.floor : ''}" placeholder="${fa.v ? 'auto ' + fmt(fa.v) : 'none'}" style="width:100px"></div>
         <div><button data-a="resetitem" data-id="${it.id}">↺ Reset to default</button></div>
+        <div><button data-a="remove" data-id="${it.id}" class="r" title="Remove from bazaar and list">✕ Remove item</button></div>
       </div>
-      <div class="hint" style="margin-top:6px">Settings here apply only to ${esc(it.name)} and stay locked even if you change the main Settings.${auto ? ` Seen abroad for ${fmt(auto.cost)} (${ago(auto.t)}).` : ''}</div>
+      <div class="hint" style="margin-top:6px">Settings here apply only to ${esc(it.name)} and stay locked even if you change the main Settings.
+        Automatic floor: ${fa.v ? `${fmt(fa.v)} (${fa.why})` : 'none'}${shopOf(it) ? ` · shop pays ${fmt(shopOf(it))}` : ''}${mvOf(it) ? ` · market ${fmt(mvOf(it))}` : ''}${auto ? ` · seen abroad for ${fmt(auto.cost)} (${ago(auto.t)})` : ''}.</div>
     </td></tr>`;
+  }
+
+  function viewLow() {
+    const g = lowState;
+    return `<div class="body" style="flex:none;max-height:40vh;border-bottom:1px solid #990000;background:#2a1515">
+      <b style="color:#ea9999">⚠ ${g.items.length} price${g.items.length > 1 ? 's are' : ' is'} below the floor</b>
+      <table class="modal"><tr><th>Item</th><th class="n">Your price</th><th class="n">Floor</th><th>Why</th><th class="n">Market</th></tr>
+      ${g.items.map(it => { const f = floorInfo(it); return `<tr><td>${esc(it.name)}</td><td class="n"><b style="color:#ea9999">${fmt(it.plan.price)}</b></td><td class="n">${fmt(f.v)}</td><td>${esc(f.why)}</td><td class="n">${fmt(mvOf(it))}</td></tr>`; }).join('')}
+      </table>
+      <div style="margin-top:6px;display:flex;gap:6px;flex-wrap:wrap"><button data-a="lowfix" class="y">Use the floor price</button><button data-a="lowgo" class="r">Apply my prices anyway</button><button data-a="lowcancel">Cancel</button></div></div>`;
   }
 
   function viewGuard() {
     const g = guardState;
     return `<div class="body" style="flex:none;max-height:40vh;border-bottom:1px solid #7f6000;background:#2a2400">
-      <b style="color:#ffe599">⚠ The market has moved since you planned these prices</b>
-      <table class="modal"><tr><th>Item</th><th class="n">Your plan</th><th class="n">Cheapest then</th><th class="n">Cheapest now</th><th class="n">New suggestion</th><th>Use</th></tr>
+      <b style="color:#ffe599">⚠ The market has moved since you set these prices</b>
+      <table class="modal"><tr><th>Item</th><th class="n">Your price</th><th class="n">Cheapest then</th><th class="n">Cheapest now</th><th class="n">New suggestion</th><th>Use</th></tr>
       ${g.items.map(it => { const p = prices[it.id], now = lowestOther(p), sug = suggest(it, p); return `<tr><td>${esc(it.name)}</td><td class="n">${fmt(it.plan.price)}</td><td class="n">${fmt(it.plan.priceRef)}</td><td class="n">${fmt(now)}</td><td class="n"><b>${fmt(sug)}</b></td>
-        <td><select id="tbm-g-${it.id}"><option value="keep">My plan</option><option value="new" ${g.choice[it.id] === 'new' ? 'selected' : ''}>New suggestion</option></select></td></tr>`; }).join('')}
+        <td><select id="tbm-g-${it.id}"><option value="keep">My price</option><option value="new" ${g.choice[it.id] === 'new' ? 'selected' : ''}>New suggestion</option></select></td></tr>`; }).join('')}
       </table>
       <div style="margin-top:6px;display:flex;gap:6px;flex-wrap:wrap"><button data-a="guardnew" class="y">Use new prices for all</button><button data-a="guardgo" class="g">Continue with my choices</button><button data-a="guardcancel">Cancel</button></div></div>`;
   }
@@ -967,15 +1047,15 @@
       list.map(i => `<tr><td>${esc(i.name)}${isNever(i.name) ? ' <span class="hint">(never sell)</span>' : ''}</td><td class="opt">${esc(catName(i.type))}</td><td class="n">${i.amount}</td><td class="n">${fmt(val(i))}</td>
         <td>${items[i.id] ? '<span style="color:#6aa84f">In bazaar list</span>' : `<button data-a="track" data-id="${i.id}">+ Add</button>`}</td></tr>`).join('') + '</table>';
   }
-  // market prices for the inventory list – one bulk call (torn/{ids}/items)
+  // market value + shop sell price – one bulk call per 100 items (torn/{ids}/items)
   let invValues = load('invValues', {});
   async function fetchInvValues(ids) {
-    const need = ids.filter(id => !invValues[id] || Date.now() - invValues[id].t > cfg.cacheMin * 60000);
+    const need = ids.filter(id => !invValues[id] || invValues[id].sell == null || Date.now() - invValues[id].t > cfg.cacheMin * 60000);
     for (let i = 0; i < need.length; i += 100) {
       const chunk = need.slice(i, i + 100);
       try {
         const j = await torn(`torn/${chunk.join(',')}/items`, 'Market values');
-        for (const it of j.items || []) invValues[String(it.id)] = { mp: +((it.value || {}).market_price) || 0, t: Date.now() };
+        for (const it of j.items || []) { const v = it.value || {}; invValues[String(it.id)] = { mp: +(v.market_price != null ? v.market_price : it.market_value) || 0, sell: +(v.sell_price != null ? v.sell_price : it.sell_price) || 0, t: Date.now() }; }
       } catch (e) { if ([2, 7, 16].includes(e.code)) throw e; }
     }
     save('invValues', invValues);
@@ -995,7 +1075,8 @@
     const o = (k, v, l) => `<option value="${v}" ${String(cfg[k]) === String(v) ? 'selected' : ''}>${l}</option>`;
     const deltaChoice = ['-1', '-1%', '0'].includes(String(cfg.priceDelta)) ? String(cfg.priceDelta) : 'other';
     const customCount = Object.values(items).filter(t => t.custom || t.floor != null).length;
-    const desc = { fast: '$1 under the cheapest seller. Never below 70 % of the market price.', balanced: '$1 under the cheapest seller, but ignores the single cheapest listing and never goes below 90 % of the market price.', profit: 'Market price − $1. Highest price, sells slower.', custom: 'You choose everything below.' };
+    const sp = +cfg.safetyPct || 0;
+    const desc = { fast: `$1 under the cheapest seller. Never below 70 % of the market price${sp > 70 ? ` (your safety floor of ${sp} % wins)` : ''}.`, balanced: `$1 under the cheapest seller, but ignores the single cheapest listing and never goes below 90 % of the market price${sp > 90 ? ` (your safety floor of ${sp} % wins)` : ''}.`, profit: 'Market price − $1. Highest price, sells slower.', custom: 'You choose everything below.' };
     return `<div class="set">
       <h4>💲 How should prices be set?</h4>
       <div class="presets">
@@ -1003,6 +1084,8 @@
       </div>
       <div class="hint" style="margin-top:4px">${desc[cfg.preset] || ''}</div>
       <div class="example">${exampleLine()}</div>
+      <div class="q"><div>🔒 Safety floor <span class="info" title="Applies to every item automatically. The floor is the highest of: this % of the market value, what Torn's shops pay for the item, and what you paid abroad. Suggested prices never go below it, and ▶ Apply warns you if your own price is below it. Set a floor per item with ⚙ (0 = no floor).">ⓘ</span></div>
+        Never sell below <input data-set="safetyPct" value="${cfg.safetyPct}" style="width:50px"> % of the market value <span class="hint">– and never below what a shop pays (then the item shows «Sell to shop»). 0 = off.</span></div>
       ${cfg.preset === 'custom' ? `
       <div class="q"><div>Who do you want to beat? <span class="info" title="The price your suggestion is based on.">ⓘ</span></div>
         <select data-set="priceSource">${Object.keys(SRC).map(k => o('priceSource', k, SRC[k])).join('')}</select></div>
@@ -1014,15 +1097,15 @@
       <div class="q"><div>Lowest price you accept <span class="info" title="Market price = Torn's normal price for the item. 0 = no limit.">ⓘ</span></div>
         Never below <input data-set="minPctOfMV" value="${cfg.minPctOfMV}" style="width:50px"> % of the market price</div>` : ''}
 
-      <h4>📦 Fill up <span class="info" title="Fill up always uses the items in your list (My items). Add items to the list under «From inventory».">ⓘ</span></h4>
-      <div class="q"><div>How many of each? <span class="info" title="A Refill qty you set on an item in Planmode always wins over this.">ⓘ</span></div><select data-set="qtyMode">${o('qtyMode', 'all', 'Fill all')}${o('qtyMode', 'minus1', 'Fill all −1 (keep 1)')}${o('qtyMode', 'leave', 'All but N (keep N)')}${o('qtyMode', 'pct', 'Percentage')}</select>
+      <h4>📦 Fill all <span class="info" title="Fill all uses the items in your bazaar list. Add items under «➕ Add from inventory». Items where a shop pays more are skipped.">ⓘ</span></h4>
+      <div class="q"><div>How many of each? <span class="info" title="A «Refill to» amount you set on an item always wins over this.">ⓘ</span></div><select data-set="qtyMode">${o('qtyMode', 'all', 'Everything in inventory')}${o('qtyMode', 'minus1', 'Fill all −1 (keep 1)')}${o('qtyMode', 'leave', 'All but N (keep N)')}${o('qtyMode', 'pct', 'Percentage')}</select>
         ${cfg.qtyMode === 'leave' ? ` keep <input data-set="leaveQty" value="${cfg.leaveQty}" style="width:45px"> in my inventory` : ''}
         ${cfg.qtyMode === 'pct' ? ` <input data-set="pctQty" value="${cfg.pctQty}" style="width:45px"> % of what I have` : ''}</div>
       <div class="q"><div>Never sell <span class="info" title="Items here are never added to your bazaar by the script.">ⓘ</span></div>
         ${cfg.neverSell.map((n, i) => `<span class="chip">${esc(n)}<a data-a="neverdel" data-i="${i}">✕</a></span>`).join('') || '<span class="hint">Nothing yet.</span>'}
         <div style="margin-top:4px"><input id="tbm-never" placeholder="Item name, e.g. Xanax" style="width:180px"> <button data-a="neveradd">+ Add</button></div></div>
 
-      <h4>💲 Adjust prices</h4>
+      <h4>💲 Adjust all prices</h4>
       <div class="q"><div>Which items?</div><select data-set="manageMode">${o('manageMode', 'all', 'All items')}${o('manageMode', 'undercut', 'Only items where I am undercut')}</select></div>
 
       <details><summary>Advanced</summary>
@@ -1047,8 +1130,13 @@
       case 'refresh': return refresh(false, true);
       case 'scan': return refresh(true, false);
       case 'key': return askKey();
-      case 'plan': planMode = !planMode; return render();
-      case 'apply': return actApply();
+      case 'view': cfg.view = el.dataset.v; save('cfg', cfg); openCard = null; return render();
+      case 'settings': if (tab === 'set') tab = lastTab || 'items'; else { lastTab = tab; tab = 'set'; } return render();
+      case 'apply': return actApply(false);
+      case 'max': { const it = items[id]; const n = (it.bzQty || 0) + (it.inv || 0); if (n > 0) P(it).qty = n; persist(); return render(); }
+      case 'lowfix': { for (const it of lowState.items) { const f = floorOf(it); if (f) setPlanPrice(it, f, true); } lowState = null; persist(); render(); return actApply(true); }
+      case 'lowgo': lowState = null; render(); return actApply(true);
+      case 'lowcancel': lowState = null; return render();
       case 'fill': return actFill();
       case 'adjust': return actAdjust();
       case 'bzopen': return actBazaar('open');
@@ -1056,7 +1144,7 @@
       case 'next': return nextStep();
       case 'tornsave': return pressTorn();
       case 'cancelflow': return cancelFlow();
-      case 'clearplan': if (confirm('Clear the whole plan?')) { for (const it of Object.values(items)) it.plan = {}; planBazaar = null; persist(); render(); } return;
+      case 'clearplan': if (confirm('Clear all pending changes?')) { for (const it of Object.values(items)) it.plan = {}; planBazaar = null; persist(); render(); } return;
       case 'card': openCard = openCard === id ? null : id; return render();
       case 'usesug': { const it = items[id]; setPlanPrice(it, suggest(it, prices[id]), true); persist(); return render(); }
       case 'undo': { const it = items[id]; setPlanPrice(it, 0); persist(); return render(); }
@@ -1072,7 +1160,7 @@
         for (const i of list) items[i.id] = { id: i.id, name: i.name, type: i.type, bzQty: 0, bzPrice: 0, inv: i.amount, floor: null, custom: null, plan: {} };
         persist(); render();
         if (list.length) toast(`${list.length} item${list.length > 1 ? 's' : ''} added to your bazaar list.`);
-        guard(async () => { let n = 0; for (const i of list) { n++; setStatus(`Prices ${n}/${list.length} …`); await fetchPrice(i.id); } setStatus(''); });
+        guard(async () => { await fetchInvValues(list.map(i => i.id)); let n = 0; for (const i of list) { n++; setStatus(`Prices ${n}/${list.length} …`); await fetchPrice(i.id); } setStatus(''); });
         return;
       }
       case 'invcat': invCat = el.dataset.c; save('invCat', invCat); return render();
