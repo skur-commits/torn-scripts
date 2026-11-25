@@ -4,6 +4,8 @@ A Tampermonkey userscript that gives you a full overview of your bazaar, suggest
 
 **Install:** open [toppzy-bazaar-manager.user.js](https://raw.githubusercontent.com/skur-commits/torn-scripts/main/toppzy-bazaar-manager.user.js) with Tampermonkey installed and press *Install*. Updates arrive automatically. (In Tampermonkey the script is still called «Toppzy Manager» so your key and list are kept.)
 
+**TornPDA (phone):** add the same file as a userscript in TornPDA. The script sees that it runs in TornPDA, uses your PDA API key automatically and shows the phone layout (one card per item, full screen). Change it under ⚙ → 📱 Layout (Auto / Mobile / Desktop).
+
 ## Getting started
 1. Create a Torn API key with level **Limited** (Settings → API Keys). Limited is needed to read your own bazaar.
 2. Click the 🏪 button in Torn's bottom bar (next to Notes) → 🔑 → paste the key.

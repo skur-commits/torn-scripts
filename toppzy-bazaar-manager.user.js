@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Toppzy Manager
 // @namespace    toppzy.torn
-// @version      0.3.5
+// @version      0.3.6
 // @description  Shopkeeper – bazaar manager for Torn: overview of everything in your bazaar (also sold-out items), price suggestions from Item Market + bazaars with an automatic safety floor (85 % of market, shop price, price paid abroad), prepare changes anywhere (even while flying) and apply them in Torn with one click. Only fills fields – you always press Save / Add yourself.
 // @author       Toppzy [4422625]
 // @match        https://www.torn.com/*
@@ -20,7 +20,7 @@
 (function () {
   'use strict';
   if (window.top !== window.self) return;
-  const VERSION = '0.3.5';
+  const VERSION = '0.3.6';
 
   /* =====================================================================
    *  SETTINGS
@@ -43,7 +43,8 @@
     useWeav3r: true,
     guardPct: 1,            // price guard: warn if market moved more than this %
     safetyPct: 85,          // 0.3.4: automatic floor = this % of market value (0 = off)
-    view: 'simple'          // 0.3.4: simple | advanced
+    view: 'simple',         // 0.3.4: simple | advanced
+    layout: 'auto'          // 0.3.6: auto | mobile | desktop
   }, PRESETS.balanced);
   const SRC = {
     lowestBoth: 'Cheapest seller anywhere (Item Market or bazaar)',
@@ -66,7 +67,11 @@
   if (!Array.isArray(cfg.neverSell)) cfg.neverSell = [];
   delete cfg.addWhich;                                                   // 0.3.1: Fill up always uses my list
   if ('exclude' in cfg) { delete cfg.exclude; delete cfg.strategy; cfg.preset = 'balanced'; Object.assign(cfg, PRESETS.balanced); save('cfg', cfg); } // 0.2 → 0.3
-  let key = load('key', '');
+  // TornPDA (mobile app): detected automatically. PDA replaces the placeholder below with the user's own API key.
+  const IS_PDA = typeof window.flutter_inappwebview !== 'undefined' || typeof window.PDA_httpGet === 'function';
+  const PDA_KEY = '###PDA-APIKEY###';
+  const pdaKey = () => (IS_PDA && /^[A-Za-z0-9]{16}$/.test(PDA_KEY)) ? PDA_KEY : '';
+  let key = load('key', '') || pdaKey();
   let me = load('me', 0);
   let items = load('items', null);
   if (!items) {                                   // migrate 0.2 "tracked"
@@ -124,6 +129,7 @@
   }
   function weav3r(id) {
     const url = `https://weav3r.dev/api/marketplace/${id}`;
+    if (typeof window.PDA_httpGet === 'function') return window.PDA_httpGet(url, {}).then(r => JSON.parse(r.responseText));   // TornPDA
     if (typeof GM_xmlhttpRequest === 'function') {
       return new Promise((res, rej) => GM_xmlhttpRequest({ method: 'GET', url, timeout: 15000,
         onload: x => { try { res(JSON.parse(x.responseText)); } catch (e) { rej(e); } }, onerror: rej, ontimeout: rej }));
@@ -234,6 +240,7 @@
     return c.reduce((a, b) => b.v > a.v ? b : a, { v: 0, why: '' });
   }
   const floorOf = it => floorInfo(it).v;
+  const mobileLayout = () => cfg.layout === 'mobile' || (cfg.layout !== 'desktop' && (IS_PDA || window.innerWidth <= 700));
   const lowPrice = it => { const pl = it.plan || {}, f = floorOf(it); return !!(pl.price && f && pl.price < f); };
   function suggest(it, p) {
     if (!p || isUnique(it)) return 0;
@@ -767,6 +774,28 @@
   #tbm input.cp.low{border-color:#e06666 !important;color:#ea9999 !important}
   #tbm .lowtxt{color:#ea9999;font-size:11px}
   #tbm .lock{cursor:help}
+  #tbm.mob{left:0;right:0;top:0;bottom:0;width:auto;max-width:none;max-height:none;border-radius:0;border-width:0 0 0 0;font-size:14px}
+  #tbm.mob header .ad{width:100%;order:9}
+  #tbm.mob button{padding:8px 10px;font-size:14px}
+  #tbm.mob .seg button,#tbm.mob button.ico{padding:7px 9px}
+  #tbm.mob input,#tbm.mob select{font-size:16px;padding:6px 7px}
+  #tbm .cards{display:flex;flex-direction:column;gap:8px;padding-top:4px}
+  #tbm .it{background:#232323;border:1px solid #333;border-radius:6px;padding:8px 10px}
+  #tbm .it.planned{background:#1e2a1a;border-color:#38761d}
+  #tbm .it.removing{background:#2a1515;border-color:#990000}
+  #tbm .it .r1{display:flex;align-items:center;gap:8px}
+  #tbm .it .r1 .nm{flex:1;font-size:15px;min-width:0}
+  #tbm .it .r1 a.gear{font-size:20px}
+  #tbm .it .r1 a.x{font-size:18px;padding:0 4px}
+  #tbm .it .r2{color:#aaa;margin:6px 0}
+  #tbm .it .r2 b{color:#fff}
+  #tbm .it .r3{display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-top:6px}
+  #tbm .it .r3 label{width:72px;color:#999;font-size:12px}
+  #tbm .it input.cp{width:120px}
+  #tbm .it input.pq{width:70px}
+  #tbm .it .sug,#tbm .it .max{padding:6px 9px !important;font-size:13px !important}
+  #tbm .it .st{font-size:12px}
+  #tbm .it .cardbox{margin-top:8px;background:#1b1b1b;border-radius:4px;padding:8px}
   @media (max-width:700px){
     #tbm{right:4px;left:4px;width:auto;max-width:none;bottom:50px;max-height:calc(100vh - 90px)}
     #tbm .opt{display:none}
@@ -827,6 +856,8 @@
   function render() {
     const w = document.getElementById('tbm'); if (!w) return;
     badge();
+    const fb = document.getElementById('tbm-btn');           // floating button would cover the full-screen panel on phones
+    if (fb && fb.classList.contains('tbm-float')) fb.style.display = (w.style.display === 'flex' && mobileLayout()) ? 'none' : '';
     if (w.style.display !== 'flex') return;
     const all = Object.values(items);
     const value = all.reduce((s, t) => s + (t.bzQty || 0) * (t.bzPrice || 0), 0);
@@ -839,6 +870,7 @@
       ? (bazaar.open === false ? '<button data-a="bzopen" title="Go to Personalize and choose Open – you press «change details»">🔓 Open bazaar</button>' : '<button data-a="bzclose" title="Go to Personalize and choose Closed – you press «change details»">🔒 Close bazaar</button>')
       : `<button data-a="bzopen" title="Go to Personalize and choose Open – you press «change details»">🔓 Open bazaar</button>
         <button data-a="bzclose" title="Go to Personalize and choose Closed – you press «change details»">🔒 Close bazaar</button>`;
+    w.classList.toggle('mob', mobileLayout());
     w.innerHTML = `
       <header>
         <span class="ttl">🏪 Shopkeeper</span><span class="ver">v${VERSION}</span>
@@ -923,6 +955,7 @@
     list.sort((a, b) => ord(a) - ord(b) || (a.name || '').localeCompare(b.name || ''));
     if (!list.length) return '<p>No items here – press ⟳ to load your bazaar, or add items under ➕ Add from inventory.</p>';
     const simple = cfg.view !== 'advanced';
+    if (simple && mobileLayout()) return `<div class="cards">${list.map(viewItemCard).join('')}</div>`;
     const head = simple
       ? `<tr><th></th><th>Item</th><th class="n">In bazaar</th><th class="n">Inv</th><th class="n">Price</th><th>New price</th><th>Refill to</th><th class="stc">Status</th><th></th></tr>`
       : `<tr><th></th><th>Item</th><th class="n">In bazaar</th><th class="n opt">Inv</th><th class="n">Your price</th>
@@ -967,11 +1000,38 @@
       }).join('') + '</table>';
   }
 
+  // mobile / TornPDA: one card per item
+  function viewItemCard(it) {
+    const s = status(it), pl = it.plan || {}, sug = suggest(it, prices[it.id]);
+    const fi = floorInfo(it), uniq = isUnique(it), low = lowPrice(it);
+    const cls = pl.remove ? 'removing' : (pl.price || pl.qty) ? 'planned' : '';
+    const add = addOf(it), hasQ = pl.qty > 0;
+    const showSug = !pl.price && !uniq && s.k !== 'shop' && sug && sug !== (it.bzQty ? it.bzPrice : 0);
+    return `<div class="it ${cls}">
+      <div class="r1"><a class="gear ${it.custom || it.floor != null ? 'custom' : ''}" data-a="card" data-id="${it.id}" title="Settings for this item">⚙</a>
+        <span class="nm"><a href="https://www.torn.com/page.php?sid=ItemMarket#/market/view=search&itemID=${it.id}" target="_blank">${esc(it.name || it.id)}</a>${fi.v ? ` <span class="lock" title="Floor ${fmt(fi.v)} – ${fi.why}">🔒</span>` : ''}</span>
+        <span class="st" style="background:${pl.remove ? '#e06666' : s.col}">${pl.remove ? 'Removing' : esc(s.txt)}</span>
+        <a class="x" data-a="remove" data-id="${it.id}" title="Remove from bazaar and list">✕</a></div>
+      <div class="r2">In bazaar <b>${it.bzQty || 0}</b> · Inv <b>${it.inv || 0}</b> · Price <b>${it.bzQty ? fmt(it.bzPrice) : '–'}</b>${fi.v ? ` · Floor ${fmt(fi.v)}` : ''}</div>
+      <div class="r3"><label>New price</label><input class="cp ${pl.price ? 'set' : ''} ${low ? 'low' : ''}" data-id="${it.id}" value="${pl.price ? pl.price.toLocaleString('en-US') : ''}" placeholder="new price" inputmode="numeric">
+        ${pl.price ? `<button class="mini" data-a="undo" data-id="${it.id}" title="Undo">↺</button>` : ''}${showSug ? `<button class="sug" data-a="usesug" data-id="${it.id}">⇐ ${fmt(sug)}</button>` : ''}${uniq && !pl.price ? '<span class="hint">manual price</span>' : ''}</div>
+      ${low ? `<div class="lowtxt">below floor ${fmt(fi.v)} (${fi.why})</div>` : ''}
+      <div class="r3"><label>Refill to</label>${(it.inv > 0 || hasQ) ? `<input class="pq" data-id="${it.id}" value="${hasQ ? pl.qty : ''}" placeholder="${it.bzQty || 0}" inputmode="numeric" style="${hasQ ? 'border-color:#6aa84f;color:#b6d7a8' : ''}"><button class="max" data-a="max" data-id="${it.id}">Max</button>${hasQ ? `<span class="add">+${add}</span>` : ''}${s.k === 'shop' ? '<span class="hint">shop pays more</span>' : ''}` : `<span class="hint">${s.k === 'shop' ? 'shop pays more' : 'none in inventory'}</span>`}</div>
+      ${openCard === it.id ? `<div class="cardbox">${cardInner(it)}</div>` : ''}
+    </div>`;
+  }
+
   function viewCard(it) {
     const s = it.custom, cur = s ? (s.name || 'custom') : 'default', auto = abroad[it.id];
     const opt = (v, l) => `<option value="${v}" ${cur === v ? 'selected' : ''}>${l}</option>`;
     const fa = floorInfo(Object.assign({}, it, { floor: null }));
-    return `<tr class="card"><td colspan="20">
+    return `<tr class="card"><td colspan="20">${cardInner(it)}</td></tr>`;
+  }
+  function cardInner(it) {
+    const s = it.custom, cur = s ? (s.name || 'custom') : 'default', auto = abroad[it.id];
+    const opt = (v, l) => `<option value="${v}" ${cur === v ? 'selected' : ''}>${l}</option>`;
+    const fa = floorInfo(Object.assign({}, it, { floor: null }));
+    return `
       <div class="grid">
         <div><label>Price strategy for ${esc(it.name)}</label><select data-card="strategy" data-id="${it.id}">
           ${opt('default', 'Use default (Settings)')}${opt('fast', '🏃 Sell fast')}${opt('balanced', '⚖️ Balanced')}${opt('profit', '💰 Max profit')}${opt('custom', '✏️ Custom')}</select></div>
@@ -986,8 +1046,7 @@
         <div><button data-a="remove" data-id="${it.id}" class="r" title="Remove from bazaar and list">✕ Remove item</button></div>
       </div>
       <div class="hint" style="margin-top:6px">Settings here apply only to ${esc(it.name)} and stay locked even if you change the main Settings.
-        Automatic floor: ${fa.v ? `${fmt(fa.v)} (${fa.why})` : 'none'}${shopOf(it) ? ` · shop pays ${fmt(shopOf(it))}` : ''}${mvOf(it) ? ` · market ${fmt(mvOf(it))}` : ''}${auto ? ` · seen abroad for ${fmt(auto.cost)} (${ago(auto.t)})` : ''}.</div>
-    </td></tr>`;
+        Automatic floor: ${fa.v ? `${fmt(fa.v)} (${fa.why})` : 'none'}${shopOf(it) ? ` · shop pays ${fmt(shopOf(it))}` : ''}${mvOf(it) ? ` · market ${fmt(mvOf(it))}` : ''}${auto ? ` · seen abroad for ${fmt(auto.cost)} (${ago(auto.t)})` : ''}.</div>`;
   }
 
   function viewLow() {
@@ -1080,6 +1139,8 @@
     const sp = +cfg.safetyPct || 0;
     const desc = { fast: `$1 under the cheapest seller. Never below 70 % of the market price${sp > 70 ? ` (your safety floor of ${sp} % wins)` : ''}.`, balanced: `$1 under the cheapest seller, but ignores the single cheapest listing and never goes below 90 % of the market price${sp > 90 ? ` (your safety floor of ${sp} % wins)` : ''}.`, profit: 'Market price − $1. Highest price, sells slower.', custom: 'You choose everything below.' };
     return `<div class="set">
+      <div class="q"><div>📱 Layout <span class="info" title="Auto = cards on phones and in TornPDA, table on a computer.">ⓘ</span></div>
+        <select data-set="layout">${o('layout', 'auto', `Auto (now: ${mobileLayout() ? 'mobile' : 'desktop'}${IS_PDA ? ', TornPDA' : ''})`)}${o('layout', 'mobile', 'Mobile – cards')}${o('layout', 'desktop', 'Desktop – table')}</select></div>
       <h4>💲 How should prices be set?</h4>
       <div class="presets">
         ${pre('fast', '🏃', 'Sell fast', desc.fast)}${pre('balanced', '⚖️', 'Balanced', desc.balanced)}${pre('profit', '💰', 'Max profit', desc.profit)}${pre('custom', '✏️', 'Custom', desc.custom)}
@@ -1128,7 +1189,7 @@
   function act(a, el) {
     const id = el && el.dataset ? el.dataset.id : null;
     switch (a) {
-      case 'close': document.getElementById('tbm').style.display = 'none'; return;
+      case 'close': document.getElementById('tbm').style.display = 'none'; return render();
       case 'refresh': return refresh(false, true);
       case 'scan': return refresh(true, false);
       case 'key': return askKey();
@@ -1182,6 +1243,8 @@
     build();
     if (location.href !== lastHref) { lastHref = location.href; pendingSave = null; render(); if (flow) runFlowStep(); watchManage(); }
   }, 1500);
+  let lastMob = null;
+  window.addEventListener('resize', () => { const m = mobileLayout(); if (m !== lastMob) { lastMob = m; render(); } });
   setInterval(autoCheck, 60000);
   setTimeout(autoCheck, 5000);
   setTimeout(() => { if (flow) runFlowStep(); captureAbroad(); watchManage(); }, 1500);
