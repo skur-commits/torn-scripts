@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Jumpy – Torn happy-jump helper
 // @namespace    jumpy.torn
-// @version      0.1.6
+// @version      0.1.7
 // @description  Jumpy guides you through a happy jump (Console, Candy or eDVD): plan, happy target before Ecstasy, quarter-hour tick warning, drug/booster cooldowns, next-jump countdown, items needed and the gain after. Item buttons use one item per click (the same request as Torn's own Okay button, like TornTools Quick items) – nothing happens by itself.
 // @author       Toppzy [4422625]
 // @match        https://www.torn.com/*
@@ -17,7 +17,7 @@
 (function () {
   'use strict';
   if (window.top !== window.self) return;
-  const VERSION = '0.1.6';
+  const VERSION = '0.1.7';
 
   /* =====================================================================
    *  STORAGE
@@ -179,27 +179,37 @@
    *  PLAN
    * ===================================================================*/
   const E = () => D ? D.e : 0;
+  // 0.1.7: how many candy / eDVD fit in the booster cooldown right now (you can use one while it is 24h or less).
+  // During a jump, what this jump already used is taken out again, so the plan does not shrink as you eat.
+  function boosterBase() {
+    // during a jump: the booster cooldown at Start, counted down – what this jump adds does not shrink the plan
+    if (J && J.phase !== 'idle' && J.phase !== 'done' && J.start) return Math.max(0, (J.start.booster || 0) - Math.floor((Date.now() - J.t0) / 1000));
+    return cdNow('booster');
+  }
+  const fitN = per => { const b = boosterBase(), step = per * boostF(); return b > 86400 ? 0 : Math.floor((86400 - b) / step) + 1; };
   function plan() {
     const t = cfg.jump, emax = D ? D.emax : 150, base = D && D.hmax ? D.hmax : 0;
     const stackE = Math.min(CAP, Math.max(E(), cfg.xan * 250 + emax));
     const totalE = stackE + (cfg.refill ? emax : 0);
     const conE = t === 'console' ? Math.round(totalE * (hasGamer() ? 0.41 : 0.30) / 5) * 5 : 0;   // best share (Vladar's gym formula)
     const JP = jobPlan();
-    const items = t === 'edvd' ? cfg.edvd * dvdH() : cfg.candy * candyH() + (cfg.fin ? dvdH() : 0);
+    const run = J && J.phase !== 'idle' && J.phase !== 'done';
+    const nC = cfg.candy, nD = cfg.edvd, fin = cfg.fin ? 1 : 0;
+    const items = t === 'edvd' ? nD * dvdH() : nC * candyH() + fin * dvdH();
     const target = Math.min(Math.floor(HMAX / 2), base + items + JP.h + conE * (hasGamer() ? 40 : 20));
     const steps = [];
     steps.push({ id: 'xan', nm: 'Xanax', of: cfg.xan, btn: '💊 USE XANAX', item: 'Xanax' });
-    if (JP.used.length) steps.push({ id: 'perk', nm: `Job special: ${JP.used.join(' + ')}`, sub: `${cfg.jp} JP → +${fmt(JP.h)} happy`, of: 1, btn: '→ Job specials', nav: 'job' });
-    if (t === 'edvd') steps.push({ id: 'dvd', nm: `Erotic DVD (+${fmt(dvdH())})`, of: cfg.edvd, btn: '📀 USE eDVD', item: 'Erotic DVD' });
+    if (JP.used.length) steps.push({ id: 'perk', nm: `Job special: ${JP.used.join(' + ')}`, sub: `${J && J.phase !== 'idle' && J.jp != null ? J.jp : cfg.jp} JP → +${fmt(JP.h)} happy`, of: 1, btn: '→ Job specials', nav: 'job' });
+    if (t === 'edvd') { if (nD) steps.push({ id: 'dvd', nm: `Erotic DVD (+${fmt(dvdH())})`, of: nD, btn: '📀 USE eDVD', item: 'Erotic DVD' }); }
     else {
-      steps.push({ id: 'candy', nm: `${CN()} (+${candyH()})`, of: cfg.candy, btn: '🍬 EAT CANDY', item: CN() });
-      if (cfg.fin) steps.push({ id: 'fdvd', nm: `Erotic DVD finisher (+${fmt(dvdH())})`, of: 1, btn: '📀 USE eDVD', item: 'Erotic DVD' });
+      if (nC) steps.push({ id: 'candy', nm: `${CN()} (+${candyH()})`, of: nC,  btn: '🍬 EAT CANDY', item: CN() });
+      if (fin) steps.push({ id: 'fdvd', nm: `Erotic DVD finisher (+${fmt(dvdH())})`, of: 1, btn: '📀 USE eDVD', item: 'Erotic DVD' });
     }
     if (t === 'console') steps.push({ id: 'con', nm: 'Game Console – Hardcore (5E)', of: Math.round(conE / 5), btn: '🎮 USE CONSOLE', item: 'Game Console', approx: true });
     steps.push({ id: 'ecs', nm: 'Ecstasy', of: 1, btn: '💊 TAKE ECSTASY', item: 'Ecstasy' });
     steps.push({ id: 'gym', nm: 'Gym – train all', of: 1, btn: '🏋 GO TO GYM', nav: 'gym' });
     if (cfg.refill) { steps.push({ id: 'ref', nm: 'Energy refill (30 points)', of: 1, btn: '⚡ REFILL → Points', nav: 'points' }); steps.push({ id: 'gym2', nm: 'Gym – train refill', of: 1, btn: '🏋 GO TO GYM', nav: 'gym' }); }
-    return { t, steps, target, totalE, conE, stackE, base };
+    return { t, steps, target, totalE, conE, stackE, base, nC, nD };
   }
   // Vladar's gym formula (Torn Wiki), calibrated ×1.045
   const gainPer10 = (S0, H, dots) => (has('regime') ? 1.03 : 1) * 1.045 * dots * 10 * ((3.480061e-7 * Math.log(H + 250) + 3.091619e-6) * S0 + 6.827752e-5 * (H + 250) - 0.0301432);
@@ -279,6 +289,7 @@
   function lockReason(st) {
     if (st.id === 'xan' && cdNow('drug') > 0) return `Drug cooldown ${hm(cdNow('drug'))}`;
     if (st.id === 'ecs' && cdNow('drug') > 0) return `Drug cooldown ${hm(cdNow('drug'))} – Ecstasy can't be taken yet`;
+    if (['candy', 'dvd'].includes(st.id) && !used(st.id) && cdNow('booster') > 0) return `Booster cooldown ${hm(cdNow('booster'))} – ${st.id === 'dvd' ? 'eDVD' : 'candy'} unlocks at 0 (full ${st.of})`;
     if (['candy', 'dvd', 'fdvd'].includes(st.id) && cdNow('booster') > 86400) return 'Booster cooldown over 24h – wait';
     if (st.id === 'ref' && D && D.points < 30) return 'Not enough points (30)';
     return '';
@@ -303,7 +314,13 @@
     return L;
   }
   const missing = P => D && D.inv ? needs(P).filter(([, n, h]) => n > h) : [];
-  function waitFor() { const d = cdNow('drug'), b = cfg.jump === 'console' ? 0 : cdNow('booster'); return b > d ? { s: b, why: 'booster' } : { s: d, why: d ? 'drug' : '' }; }
+  function waitFor() { const d = cdNow('drug'); return { s: d, why: d ? 'drug' : '' }; }
+  // when all planned candy / eDVD fit again
+  function boosterNote(P) {
+    if (P.t === 'edvd' ? P.nD >= cfg.edvd : P.nC >= cfg.candy) return '';
+    const per = P.t === 'edvd' ? 21600 : 1800, want = P.t === 'edvd' ? cfg.edvd : cfg.candy, wait = Math.max(0, boosterBase() - (86400 - (want - 1) * per * boostF()));
+    return `Booster cooldown ${hm(cdNow('booster'))}: ${P.t === 'edvd' ? `${P.nD} of ${want} eDVD` : `${P.nC} of ${want} candy`} fit now – all ${want} fit in ${hm(wait)}. You can still start and stack Xanax.`;
+  }
 
   /* =====================================================================
    *  ACTIONS – one click = one thing (open a Torn page, or mark a step)
@@ -353,6 +370,8 @@
     J.loc[st.id] = (J.loc[st.id] || 0) + 1; J.used[st.id] = Math.max(J.used[st.id] || 0, J.loc[st.id]);
     if (D && D.inv) D.inv[st.item] = Math.max(0, (D.inv[st.item] || 0) - (st.id === 'con' ? 0 : 1));
     if (st.id !== 'xan') { J.ok.xan = true; if (J.phase === 'stacking') J.phase = 'active'; }
+    if (['con', 'ecs', 'fdvd'].includes(st.id) && J.nC == null) J.nC = J.used.candy || 0;    // candy is finished – lock the count
+    if (st.id === 'ecs' && J.nD == null) J.nD = J.used.dvd || 0;
     const now = text.match(/You now have ([\d,]+)\s*\/\s*[\d,]+ happiness/i), gain = text.match(/You gain ([\d,]+) happiness/i), num = v => +String(v).replace(/,/g, '');
     const before = D ? D.happy : 0;
     if (D) { if (now) D.happy = num(now[1]); else if (gain) D.happy += num(gain[1]); }
@@ -371,6 +390,9 @@
     J.ok = J.ok || {}; J.ok[id] = true;
     if (id !== 'xan') { J.ok.xan = true; if (J.phase === 'stacking') J.phase = 'active'; }
     const P = plan(); for (const st of P.steps) { if (st.id === id) break; J.ok[st.id] = true; }
+    const order = P.steps.map(x => x.id), ci = order.indexOf('candy'), di = order.indexOf('dvd'), ii = order.indexOf(id);
+    if (ci >= 0 && ii >= ci && J.nC == null) J.nC = (J.used && J.used.candy) || 0;
+    if (di >= 0 && ii >= di && J.nD == null) J.nD = (J.used && J.used.dvd) || 0;
     if (id === 'ecs' && D) J.ecsHappy = D.happy;
     if (id === 'gym' && D) J.ptsGym = D.points;
     track(); saveJ(); render();
@@ -411,6 +433,7 @@
   #jpy .eg{display:grid;grid-template-columns:1fr 1fr;gap:0 8px;font-size:13px;font-weight:bold;color:#f1c232;margin-top:2px}#jpy .eg small{color:#999;font-weight:normal;font-size:10px;margin-right:2px}
   #jpy .hp{grid-column:1/-1}#jpy .meter{height:9px;background:#333;border-radius:5px;overflow:hidden;margin-top:4px}#jpy .meter i{display:block;height:100%;background:#f1c232}
   #jpy .cd{grid-column:1/-1;display:flex;gap:6px}#jpy .cd .st{flex:1}#jpy .cd .n{font-size:15px}#jpy .cd .n small{display:block;font-size:10px;white-space:normal}
+  #jpy .tl{display:flex;justify-content:space-between;gap:4px;font-size:12px;color:#ccc}#jpy .tl b{font-size:12px}
   #jpy .tick{float:right;font-size:12px;font-weight:bold}#jpy .tick.ok{color:#93c47d}#jpy .tick.hot{color:#e06666}
   #jpy .startbar{padding:0 9px 8px;display:grid;gap:5px}
   #jpy .act{min-width:140px;min-height:40px;font-weight:bold;border-radius:5px}
@@ -499,8 +522,11 @@
     }
     if (P.t === 'console' && !hasGamer()) h += `<div class="warnbox">⚠ <b>No Gamer perk.</b> Without a 5★ Toy Shop or Game Shop job the console gives only about half the happy. The plan puts ~30 % of your energy on the console instead of 41 %. <button data-a="set">⚙️ Job in Settings</button></div>`;
     const pct = D ? Math.min(100, J.ok && J.ok.ecs ? 100 : D.happy / Math.max(1, P.target) * 100) : 0, hot = D && D.happy > (D.hmax || 0) && toTick() < 180;
-    const nj = running ? `<div class="n" style="color:#f1c232">In progress<small>${J.phase === 'stacking' ? 'stacking Xanax' : 'jump running'}</small></div>`
-      : W.s ? `<div class="n" style="color:#e06666">${hm(W.s)}<small>waiting for ${W.why} cooldown</small></div>` : `<div class="n" style="color:#93c47d">${key ? 'Ready now' : '–'}<small>${cfg.jump === 'console' ? 'drug cooldown is 0' : 'drug + booster at 0'}</small></div>`;
+    const tl = (lab, s) => `<div class="tl"><span>${lab}</span><b style="color:${s ? '#e06666' : '#93c47d'}">${s ? hm(s) : 'ready'}</b></div>`;
+    const boostLeft = !(J.used && (J.used.candy || J.used.dvd)) && cfg.jump !== 'none' ? cdNow('booster') : 0;
+    const timeline = tl('💊 Xanax', cdNow('drug')) + tl(cfg.jump === 'edvd' ? '📀 eDVD' : '🍬 Candy', boostLeft);
+    const nj = running ? `<div class="n" style="color:#f1c232;font-size:13px">In progress</div>${timeline}`
+      : `${timeline}<div class="hint" style="font-size:10px">${!key ? '' : W.s ? 'Start when Xanax is ready' : 'Start now – stack Xanax'}</div>`;
     const EG = expGains(P), AB = { strength: 'STR', defense: 'DEF', speed: 'SPD', dexterity: 'DEX' };
     h += `<div class="stats">
       <div class="st"><div class="k">Energy</div><div class="n">${fmt(E())} <small>/ ${fmt(D ? D.emax : 0)}</small></div></div>
