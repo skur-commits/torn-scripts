@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Shopkeeper – Torn bazaar manager
 // @namespace    shopkeeper.torn
-// @version      0.3.9
+// @version      0.4.0
 // @description  Shopkeeper – bazaar manager for Torn: overview of everything in your bazaar (also sold-out items), price suggestions from the Item Market and bazaars (bazaar prices via weav3r.dev), a safety floor you choose (% of market value, shop price, price paid abroad), fixed prices per item, and changes you can prepare anywhere – even while flying. One click = one action: the script only fills fields, you always press Torn's own buttons.
 // @author       Toppzy [4422625]
 // @match        https://www.torn.com/*
@@ -20,7 +20,7 @@
 (function () {
   'use strict';
   if (window.top !== window.self) return;
-  const VERSION = '0.3.9';
+  const VERSION = '0.4.0';
 
   /* =====================================================================
    *  SETTINGS
@@ -47,6 +47,7 @@
     layout: 'auto',         // 0.3.6: auto | mobile | desktop
     rareIM: true,           // 0.3.8: rare items (few Item Market listings) are priced from the cheapest Item Market listing
     rareMax: 5,             // 0.3.8: «rare» = fewer than this many Item Market listings
+    direct: true,           // 0.4.0: one-click Apply – send the changes straight to Torn (same requests as Torn's SAVE CHANGES / CONFIRM)
     rareDelta: '-1%'
   }, PRESETS.balanced);
   const SRC = {
@@ -612,9 +613,102 @@
       });
       if (moved.length) { showGuard(moved, steps); return; }
     }
-    startFlow(steps);
+    startApply(steps);
   }
   let applyNote = '';
+  /* ---- 0.4.0: one-click Apply ------------------------------------------------------------
+   * One click sends ONE change to Torn – the same request Torn's own SAVE CHANGES (Manage) or CONFIRM (Add items)
+   * sends. Before it, Shopkeeper reads your bazaar listings / inventory stacks (Torn's own lists) to get their IDs.
+   * Prices + removals = one click, new items = one click. Open/Closed still goes via the Personalize page. */
+  const rfc = () => (document.cookie.match(/(?:^|; )rfc_v=([^;]+)/) || [])[1] || '';
+  const strip = h => String(h == null ? '' : h).replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+  async function tornReq(url, body) {
+    const r = await fetch(url + (url.includes('?') ? '&' : '?') + 'rfcv=' + rfc(), body ? { method: 'POST', body, credentials: 'same-origin', headers: { 'x-requested-with': 'XMLHttpRequest' } } : { credentials: 'same-origin', headers: { 'x-requested-with': 'XMLHttpRequest' } });
+    const t = await r.text();
+    try { return JSON.parse(t); } catch (e) { throw new Error(strip(t).slice(0, 160) || 'Torn did not answer'); }
+  }
+  let direct = null;            // { steps, i, rest, logs, err }
+  function startApply(steps) {
+    const d = steps.filter(x => x === 'manage' || x === 'add'), rest = steps.filter(x => x === 'personalize');
+    if (!cfg.direct || !d.length || !location.hostname.includes('torn.com')) return startFlow(steps);
+    direct = { steps: d, i: 0, rest, logs: [], err: '' };
+    runDirect();
+  }
+  async function runDirect() {
+    if (!direct || direct.busy) return;
+    const step = direct.steps[direct.i];
+    direct.busy = true; direct.err = ''; render();
+    try {
+      const res = step === 'manage' ? await directManage() : await directAdd();
+      direct.logs.push(...res);
+      direct.i++;
+    } catch (e) { direct.err = e.message || String(e); }
+    direct.busy = false; persist();
+    setTimeout(() => { save('lastAuto', 0); refresh(false, false); }, 2500);
+    if (pageMode() === 'manage') setTimeout(() => { lastManageRead = 0; watchManage(); }, 2500);
+    if (!direct.err && direct.i >= direct.steps.length && direct.rest.length) { const rest = direct.rest; direct.done = true; render(); return startFlow(rest); }
+    if (!direct.err && direct.i >= direct.steps.length) direct.done = true;
+    openPanel(); render();
+  }
+  async function bazaarListings() {
+    const id = await ensureMe(); let list = [], start = 0, total = 1;
+    for (let k = 0; k < 20 && start < total; k++) {
+      const j = await tornReq(`https://www.torn.com/bazaar.php?sid=bazaarData&step=getBazaarItems&start=${start}&ID=${id}&categorised=0&limit=50`);
+      const l = j.list || []; list = list.concat(l); total = +j.total || 0; start += 50; if (!l.length) break;
+    }
+    return list;
+  }
+  async function directManage() {
+    const list = await bazaarListings(), out = [];
+    for (const L of list) {
+      const it = items[String(L.itemID)]; if (!it) continue;
+      const pl = it.plan || {};
+      if (pl.remove) out.push({ bazaarID: +L.bazaarID, itemID: +L.itemID, remove: +L.amount || 1 });
+      else if (pl.price && +pl.price !== +L.price) out.push({ bazaarID: +L.bazaarID, itemID: +L.itemID, price: +pl.price });
+    }
+    const clear = () => { for (const it of Object.values(items)) if (it.plan && it.bzQty > 0 && !it.plan.remove) { if (it.plan.price) it.bzPrice = it.plan.price; delete it.plan.price; delete it.plan.locked; delete it.plan.priceRef; } };
+    if (!out.length) { clear(); for (const id in items) if (items[id].plan && items[id].plan.remove) delete items[id]; return ['Prices on Manage were already right – nothing to save.']; }
+    const fd = new FormData(); fd.append('items', JSON.stringify(out));
+    const r = await tornReq('https://www.torn.com/bazaar.php?sid=bazaarData&step=manageItems', fd);
+    if (!r.success) throw new Error(strip(r.text) || (r.errors || []).map(strip).join(' ') || 'Torn did not save the changes.');
+    clear(); for (const id in items) if (items[id].plan && items[id].plan.remove) delete items[id];
+    return (r.logs || [r.text]).map(strip).concat((r.errors || []).map(e => '⚠ ' + strip(e)));
+  }
+  async function directAdd() {
+    let inv = [], total = 1;
+    for (let k = 0; k < 20 && inv.length < total; k++) {
+      const j = await tornReq('https://www.torn.com/inventory.php', new URLSearchParams({ step: 'getList', type: 'All', start: String(inv.length) }));
+      const l = j.list || []; inv = inv.concat(l); total = +j.total || inv.length; if (!l.length) break;
+    }
+    const body = new URLSearchParams({ step: 'addInventoryItems' }), done = [], noPrice = [];
+    let n = 0;
+    for (const it of Object.values(items)) {
+      if (!(it.plan && it.plan.qty > 0) || isNever(it.name)) continue;
+      const stacks = inv.filter(x => String(x.itemID || x.ID) === String(it.id) && !+x.equiped && !+x.untradable);
+      const have = stacks.reduce((t, x) => t + (+x.Qty || 0), 0);
+      let q = addOf(it, have); if (!(q > 0)) continue;
+      const pr = (it.plan.price) || (it.bzQty > 0 ? it.bzPrice : 0) || suggest(it, prices[it.id]) || it.bzPrice || 0;
+      if (!pr) { noPrice.push(it.name); continue; }
+      let added = 0;
+      for (const x of stacks) {
+        if (q <= 0) break;
+        const a = x.itemType === 'armory' || x.groupItem ? 1 : Math.min(q, +x.Qty || 0); if (!(a > 0)) continue;
+        for (const [k, v] of Object.entries({ amount: a, price: Math.round(pr), type: x.type2 || x.type || '', id: x.armoryID, itemID: x.itemID || x.ID, estimatedPrice: x.averageprice || (prices[it.id] && prices[it.id].mv) || 0 })) body.append(`items[${n}][${k}]`, String(v));
+        n++; q -= a; added += a;
+      }
+      if (added) done.push({ it, q: added, pr });
+    }
+    const why = noPrice.length ? ` ⚠ No price for: ${noPrice.join(', ')}.` : '';
+    if (!n) return ['Nothing to add – the items are not in your inventory any more.' + why];
+    const r = await tornReq('https://www.torn.com/bazaar.php', body);
+    if (!r.success) throw new Error((strip(r.text) || 'Torn did not add the items.') + why);
+    for (const d of done) {
+      const it = d.it; it.bzQty = (it.bzQty || 0) + d.q; if (!it.bzPrice || it.bzQty === d.q) it.bzPrice = d.pr; it.soldOutAt = 0;
+      if (it.inv > 0) it.inv = Math.max(0, it.inv - d.q);
+      delete it.plan.qty; delete it.plan.price; delete it.plan.locked; delete it.plan.priceRef;
+    }
+    return (r.logs || [r.text]).map(strip).concat(why ? [why.trim()] : []);
+  }
   function startFlow(steps) { flow = { steps, i: 0, note: applyNote || '' }; applyNote = ''; save('flow', flow); render(); go(steps[0]); }
   let flowRunning = false;
   async function runFlowStep() {
@@ -941,7 +1035,7 @@
         <button data-a="settings" class="ico gear-btn ${tab === 'set' ? 'on' : ''}" title="Settings">⚙️</button><button data-a="key" class="ico ${tab === 'key' ? 'on' : ''}" title="API key and Terms of Service">🔑</button><button data-a="min" class="ico" title="${minimized ? 'Show the whole panel' : 'Minimize – see the Torn page; Save/Add/Confirm buttons stay visible'}">${minimized ? '▢' : '▁'}</button><button data-a="close" class="ico" title="Close">✕</button>
       </header>
       <div class="bar">
-        <button data-a="apply" class="g" ${c.total ? '' : 'disabled'} title="Open the right bazaar page and fill in all your changes. You press Save / Add yourself.">▶ Apply${c.total ? ` (${c.total})` : ''}</button>
+        <button data-a="apply" class="g" ${c.total ? '' : 'disabled'} title="${cfg.direct ? 'One click sends your changes straight to Torn (prices + removals, then new items). Open/Closed uses the Personalize page.' : 'Open the right bazaar page and fill in all your changes. You press Save / Add yourself.'}">▶ Apply${c.total ? ` (${c.total})` : ''}</button>${c.total && cfg.direct && !direct ? `<span class="hint">${[c.priceOut && `${c.priceOut} price${c.priceOut > 1 ? 's' : ''}`, c.rem && `${c.rem} removal${c.rem > 1 ? 's' : ''}`, c.qty && `${c.qty} item${c.qty > 1 ? 's' : ''} to add (${fmt(addValue())})`, c.bz && 'open/close'].filter(Boolean).join(' · ')}</span>` : ''}
         <button data-a="fill" class="bl" title="${mode === 'add' ? 'Fill amounts and prices for all items on this page now' : 'Refill all items in your bazaar list (amount from Settings)'}">📦 Fill all${mode === 'add' ? ' now' : ''}</button>
         <button data-a="adjust" class="bl" title="${mode === 'manage' ? 'Fill suggested prices for all items on this page now' : 'Suggested price on all items (your own prices are kept)'}">💲 Adjust all prices${mode === 'manage' ? ' now' : ''}</button>
         <span class="sp"></span>
@@ -951,6 +1045,7 @@
         <button data-a="tornconfirm" class="g big" title="Presses Torn's own CONFIRM button once">✔ CONFIRM ${pendingConfirm.step === 'add' ? 'ADD' : ''}</button><span class="hint">(or press Torn's CONFIRM / Cancel on the page)</span></div>` : flow ? `<div class="flow">▶ Applying changes – step ${flow.i + 1} of ${flow.steps.length}: <b>${stepName[flow.steps[flow.i]]}</b>
         ${mode === flow.steps[flow.i] ? (pendingSave === mode ? `<button data-a="tornsave" class="g big" title="Presses Torn's own ${SAVE_BTN[mode].replace(/^\S+\s/, '')} button once">${SAVE_BTN[mode]}</button><span class="hint">(or ${SAVE_TXT[mode]})</span>` : `<span>– ${SAVE_TXT[flow.steps[flow.i]]}.</span>`) : `<button data-a="next" class="y">Go to step ${flow.i + 1}</button>`}
         <button data-a="cancelflow">Cancel</button></div>` : (pendingSave && pendingSave === mode ? `<div class="flow">Ready on this page: <button data-a="tornsave" class="g big" title="Presses Torn's own button once">${SAVE_BTN[mode]}</button><span class="hint">(or ${SAVE_TXT[mode]})</span></div>` : '')}
+      ${direct ? viewDirect() : ''}
       ${lowState ? viewLow() : ''}
       ${guardState ? viewGuard() : ''}
       <div class="bar">
@@ -1134,13 +1229,23 @@
       </table>
       <div style="margin-top:6px;display:flex;gap:6px;flex-wrap:wrap"><button data-a="guardnew" class="y">Use new prices for all</button><button data-a="guardgo" class="g">Continue with my choices</button><button data-a="guardcancel">Cancel</button></div></div>`;
   }
+  const addValue = () => Object.values(items).reduce((t, it) => { const q = addOf(it); return q > 0 ? t + q * ((it.plan.price) || (it.bzQty > 0 ? it.bzPrice : 0) || suggest(it, prices[it.id]) || 0) : t; }, 0);
+  function viewDirect() {
+    const name = { manage: 'prices + removals', add: 'add items' }, d = direct, next = d.steps[d.i];
+    const logs = d.logs.length ? `<div class="hint" style="color:#b6d7a8">${d.logs.slice(-12).map(esc).join('<br>')}</div>` : '';
+    if (d.busy) return `<div class="flow">▶ Sending to Torn: <b>${name[next]}</b> …</div>`;
+    if (d.err) return `<div class="flow" style="border-color:#e06666">⚠ ${esc(d.err)} ${logs}<button data-a="directnext" class="g">Try again</button> <button data-a="directold">Use the Torn pages instead</button> <button data-a="directclose">Close</button></div>`;
+    if (d.done) return `<div class="flow">✓ Done. ${logs}<button data-a="directclose">Close</button></div>`;
+    const c = planCounts();
+    return `<div class="flow">✓ Step ${d.i} of ${d.steps.length} done. ${logs}<button data-a="directnext" class="g big">▶ ${next === 'add' ? `Add ${c.qty} item${c.qty > 1 ? 's' : ''} (${fmt(addValue())})` : 'Save prices + removals'}</button> <button data-a="directclose">Cancel</button></div>`;
+  }
   function showGuard(moved, steps) { guardState = { items: moved, steps, choice: {} }; openPanel(); }
   function guardFinish(allNew) {
     for (const it of guardState.items) {
       if (allNew || guardState.choice[it.id] === 'new') { const v = suggest(it, prices[it.id]); if (v) setPlanPrice(it, v, it.plan.locked); }
       else it.plan.priceRef = lowestOther(prices[it.id]);
     }
-    const steps = guardState.steps; guardState = null; persist(); startFlow(steps);
+    const steps = guardState.steps; guardState = null; persist(); startApply(steps);
   }
 
   const PLURAL = { Plushie: 'Plushies', Flower: 'Flowers', Drug: 'Drugs', Material: 'Materials', 'Supply Pack': 'Supply Packs', Collectible: 'Collectibles', Enhancer: 'Enhancers', Tool: 'Tools', Booster: 'Boosters', Book: 'Books', Artifact: 'Artifacts', Car: 'Cars', 'Energy Drink': 'Energy Drinks', Defensive: 'Armor', Other: 'Other' };
@@ -1249,6 +1354,7 @@
 
       <details><summary>Advanced</summary>
         <div class="q"><div>Check my bazaar in the background every</div><select data-set="autoCheckMin">${o('autoCheckMin', 0, 'Off')}${o('autoCheckMin', 5, '5 minutes')}${o('autoCheckMin', 15, '15 minutes')}${o('autoCheckMin', 30, '30 minutes')}</select> <span class="hint">updates «Sold out» and the red number (about 3–10 API calls)</span></div>
+        <div class="q"><label style="color:#ccc"><input type="checkbox" data-set="direct" ${cfg.direct ? 'checked' : ''}> One-click Apply – send changes straight to Torn</label> <span class="hint">off = Apply opens Torn's bazaar pages and you press SAVE / ADD / CONFIRM there</span></div>
         <div class="q"><div>Reuse prices for</div><input data-set="cacheMin" value="${cfg.cacheMin}" style="width:50px"> minutes</div>
         <div class="q"><div>Warn before Apply if the market moved more than</div><input data-set="guardPct" value="${cfg.guardPct}" style="width:50px"> %</div>
         <div class="q"><div>Max Torn API calls per minute</div><input data-set="tornPerMin" value="${cfg.tornPerMin}" style="width:50px"> <span class="hint">Torn allows 100 per minute for your whole account</span></div>
@@ -1319,6 +1425,9 @@
       case 'invsort': { const k = el.dataset.k; invSort = invSort.k === k ? { k, d: -invSort.d } : { k, d: k === 'name' ? 1 : -1 }; save('invSort', invSort); return render(); }
       case 'guardnew': return guardFinish(true);
       case 'guardgo': return guardFinish(false);
+      case 'directnext': return runDirect();
+      case 'directclose': direct = null; return render();
+      case 'directold': { const st = direct.steps.slice(direct.i).concat(direct.rest); direct = null; return startFlow(st); }
       case 'guardcancel': guardState = null; return render();
     }
   }

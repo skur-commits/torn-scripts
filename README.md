@@ -20,7 +20,7 @@ A Tampermonkey userscript that gives you a full overview of your bazaar, suggest
 ## Buttons
 | Button | What it does |
 |---|---|
-| ▶ Apply (N) | Opens Manage / Add items / Personalize one at a time and fills in all your changes. Then press the big green button in the panel (💾 SAVE CHANGES / ➕ ADD TO BAZAAR / ✔ CHANGE DETAILS) – one click presses Torn's own button once – or press Torn's button yourself (highlighted in yellow). When Torn asks *Are you sure…?* after ADD TO BAZAAR, the panel shows ✔ CONFIRM ADD for that last step. The list updates itself afterwards. Not possible while traveling – your changes are kept |
+| ▶ Apply (N) | **One-click (0.4.0, default):** one click sends your new prices and removals straight to Torn (the same request as Torn's SAVE CHANGES); if there are new items, the panel then shows **▶ Add N items ($X)** – one more click adds them (the same request as Torn's CONFIRM). Works from any Torn page; Torn's answer is shown in the panel. Open/Closed still uses the Personalize page. Settings → Advanced → *One-click Apply* off = the old way: Apply opens Manage / Add items / Personalize and you press Torn's buttons (or the big green button in the panel). Not possible while traveling – your changes are kept |
 | 📦 Fill all | Refill all items in your list (amount from Settings: Everything in inventory / All −1 / All but N / %). Items where a shop pays more are skipped |
 | 💲 Adjust all prices | Suggested price on all items – also empty ones, so the refill is priced too (your own prices are never touched) |
 | Refill to + Max | How many you want in your bazaar **in total**. Max = everything you have. «+N» shows how many will be added |
