@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Jumpy – Torn happy-jump helper
 // @namespace    jumpy.torn
-// @version      0.1.1
+// @version      0.1.2
 // @description  Jumpy guides you through a happy jump (Console, Candy or eDVD): plan, happy target before Ecstasy, quarter-hour tick warning, drug/booster cooldowns, next-jump countdown, items needed and the gain after. Nothing happens by itself – every action is one click by you on Torn's own pages.
 // @author       Toppzy [4422625]
 // @match        https://www.torn.com/*
@@ -17,7 +17,7 @@
 (function () {
   'use strict';
   if (window.top !== window.self) return;
-  const VERSION = '0.1.1';
+  const VERSION = '0.1.2';
 
   /* =====================================================================
    *  STORAGE
@@ -28,7 +28,7 @@
 
   const DEF = { jump: 'console', xan: 3, candy: 48, edvd: 5, ctype: 'kiss', refill: true, fin: false,
     co: 'none', stars: 1, coAuto: true, jp: 0, spec: 'auto', vor: 0, book: false, wdd: false,
-    stat: 'speed', dots: 5.4 };
+    lastStat: '' };                 // lastStat: the stat you trained most in your last jump (tie-break)
   let cfg = Object.assign({}, DEF, load('cfg', {}));
   const saveCfg = () => save('cfg', cfg);
 
@@ -115,7 +115,7 @@
     if (!key || busy) return;
     busy = true;
     try {
-      const u = await api('https://api.torn.com/user/?selections=bars,cooldowns,battlestats,profile,money');
+      const u = await api('https://api.torn.com/user/?selections=bars,cooldowns,battlestats,profile,money,gym');
       const prev = D || {};
       D = Object.assign({}, prev, {
         t: Date.now(),
@@ -123,9 +123,9 @@
         happy: val(u.happy && u.happy.current), hmax: val(u.happy && u.happy.maximum) || 0,
         drug: val(u.cooldowns && u.cooldowns.drug), booster: val(u.cooldowns && u.cooldowns.booster),
         stats: { strength: val(u.strength), defense: val(u.defense), speed: val(u.speed), dexterity: val(u.dexterity) },
-        points: val(u.points), coId: (u.job && u.job.company_id) || 0, coType: (u.job && u.job.company_type) || 0
+        points: val(u.points), gym: +u.active_gym || 0, coId: (u.job && u.job.company_id) || 0, coType: (u.job && u.job.company_type) || 0
       });
-      await jobFromApi();
+      await jobFromApi(); await fetchGyms();
       if (withInv || !D.invT || Date.now() - D.invT > 10 * 60000) await fetchInv();
       save('data', D);
       track();
@@ -143,6 +143,18 @@
       } catch (e) { if ([2, 7, 16].includes(e.code)) throw e; }
     }
     D.inv = inv; D.invT = Date.now();
+  }
+  // all gyms with their dots (the API stores them ×10, e.g. 73 = 7.3) – public, read once a day
+  async function fetchGyms() {
+    const c = load('gyms', null); if (c && Date.now() - c.t < 86400000) return;
+    try { const j = await api('https://api.torn.com/torn/?selections=gyms'); const g = {}; for (const id in j.gyms || {}) { const x = j.gyms[id]; g[id] = { n: x.name, e: +x.energy || 10, strength: +x.strength / 10, speed: +x.speed / 10, defense: +x.defense / 10, dexterity: +x.dexterity / 10 }; } save('gyms', { t: Date.now(), g }); } catch (e) { }
+  }
+  // which stat and dots the estimate uses – automatic: your active gym's best stat (tie → the stat you trained last jump → Speed)
+  function gymNow() {
+    const all = (load('gyms', null) || {}).g || {}, g = D && all[D.gym]; if (!g) return null;
+    const order = [cfg.lastStat, 'speed', 'strength', 'dexterity', 'defense'].filter((k, i, a) => k && a.indexOf(k) === i);
+    const best = Math.max(...order.map(k => g[k] || 0)); const stat = order.find(k => (g[k] || 0) === best);
+    return { name: g.n, stat, dots: best };
   }
   // job + stars from the API (once a day). Company type names come from torn/companies.
   async function jobFromApi() {
@@ -187,11 +199,12 @@
     return { t, steps, target, totalE, conE, stackE, base };
   }
   // Vladar's gym formula (Torn Wiki), calibrated ×1.045
-  const gainPer10 = (S0, H) => (has('regime') ? 1.03 : 1) * 1.045 * (+cfg.dots || 5) * 10 * ((3.480061e-7 * Math.log(H + 250) + 3.091619e-6) * S0 + 6.827752e-5 * (H + 250) - 0.0301432);
+  const gainPer10 = (S0, H, dots) => (has('regime') ? 1.03 : 1) * 1.045 * dots * 10 * ((3.480061e-7 * Math.log(H + 250) + 3.091619e-6) * S0 + 6.827752e-5 * (H + 250) - 0.0301432);
   function expGain(P) {
-    let h = Math.min(HMAX, P.target * 2), sp = D && D.stats ? D.stats[cfg.stat] || 0 : 0, g = 0;
+    const G = gymNow(); if (!G) return 0;
+    let h = Math.min(HMAX, P.target * 2), sp = D && D.stats ? D.stats[G.stat] || 0 : 0, g = 0;
     if (!sp) return 0;
-    for (let i = 0; i < Math.floor((P.totalE - P.conE) / 10); i++) { const x = gainPer10(sp, h); g += x; sp += x; h = Math.max(0, h - (hasGoal() ? 2.5 : 5)); }
+    for (let i = 0; i < Math.floor((P.totalE - P.conE) / 10); i++) { const x = gainPer10(sp, h, G.dots); g += x; sp += x; h = Math.max(0, h - (hasGoal() ? 2.5 : 5)); }
     return g;
   }
 
@@ -223,7 +236,7 @@
     if (J.ok.ref && D.e < 10 && J.refE) J.ok.gym2 = true;
     if (J.ok.ref && D.e >= 10) J.refE = true;
     const all = P.steps.every(st => stepDone(st));
-    if (all && J.phase !== 'done') { J.phase = 'done'; J.end = { stat: D.stats[cfg.stat], t: Date.now() }; ui.min = false; saveUi(); }
+    if (all && J.phase !== 'done') { J.phase = 'done'; J.end = { stats: Object.assign({}, D.stats), t: Date.now() }; const d = k => (J.end.stats[k] || 0) - ((J.start.stats || {})[k] || 0); const top = Object.keys(STATS).sort((a, b) => d(b) - d(a))[0]; if (d(top) > 0) { cfg.lastStat = top; saveCfg(); } ui.min = false; saveUi(); }
     saveJ();
   }
   function stepDone(st) {
@@ -271,7 +284,7 @@
     const w = waitFor(); if (w.s) return say(`Not ready – ${w.why} cooldown ${hm(w.s)} left.`, true);
     if (missing(plan()).length && !missWarned) { missWarned = true; return render(); }
     missWarned = false;
-    J = { phase: 'stacking', t0: Date.now(), jump: cfg.jump, used: {}, ok: {}, start: { e: D.e, happy: D.happy, booster: cdNow('booster'), drug: cdNow('drug'), stat: D.stats[cfg.stat], points: D.points } };
+    J = { phase: 'stacking', t0: Date.now(), jump: cfg.jump, used: {}, ok: {}, start: { e: D.e, happy: D.happy, booster: cdNow('booster'), drug: cdNow('drug'), stats: Object.assign({}, D.stats), points: D.points } };
     if (D.e > CAP - 250) { J.ok.xan = true; say(`You already have ${fmt(D.e)} energy – one more Xanax would go over ${fmt(CAP)}, so Xanax is skipped.`); }
     else say('Jump started. Step 1: stack Xanax.');
     saveJ(); render();
@@ -430,7 +443,7 @@
     const g = expGain(P);
     h += `<div class="stats">
       <div class="st"><div class="k">Energy</div><div class="n">${fmt(E())} <small>/ ${fmt(D ? D.emax : 0)}</small></div></div>
-      <div class="st"><div class="k">Expected gain</div><div class="n" style="color:#f1c232">${g ? '+' + fmt(g) : '–'} <small>${STATS[cfg.stat]}</small></div></div>
+      <div class="st"><div class="k">Expected gain</div><div class="n" style="color:#f1c232">${g ? '+' + fmt(g) : '–'} <small>${gymNow() ? STATS[gymNow().stat] : ''}</small></div>${gymNow() ? `<div class="k">${esc(gymNow().name)} · ${gymNow().dots} dots</div>` : ''}</div>
       <div class="st hp"><div class="k">Happy ${J.ok && J.ok.ecs ? '(Ecstasy taken)' : '→ target before Ecstasy'}<span class="tick ${hot ? 'hot' : 'ok'}" id="jpy-tick" title="Happy above your max drops back at the next quarter-hour tick">⏱ ${mmss(toTick())} to tick</span></div>
         <div class="n">${fmt(D ? D.happy : 0)} <small>${J.ok && J.ok.ecs ? '' : '/ ' + fmt(P.target)}</small></div><div class="meter"><i style="width:${pct}%"></i></div></div>
       <div class="cd"><div class="st"><div class="k">Drug cooldown</div><div class="n" style="color:${cdNow('drug') ? '#e06666' : '#93c47d'}">${hm(cdNow('drug'))}</div></div>
@@ -443,9 +456,10 @@
         ${W.s ? `<span class="hint">Ready in ${hm(W.s)} (${W.why} cooldown). The plan below is a preview.</span>` : ''}</div>`;
     }
     if (done) {
-      const gain = J.end && J.start ? (J.end.stat || 0) - (J.start.stat || 0) : 0;
-      h += `<div class="sum" role="status"><h3>✓ Jump complete</h3><div class="big">${gain > 0 ? '+' + fmt(gain) : '…'} ${STATS[cfg.stat]}</div>
-        <dl><dt>${STATS[cfg.stat]}</dt><dd>${fmt(J.start && J.start.stat)} → ${fmt(J.end && J.end.stat)}</dd>
+      const s0 = (J.start && J.start.stats) || {}, s1 = (J.end && J.end.stats) || {}, gained = Object.keys(STATS).filter(k => (s1[k] || 0) > (s0[k] || 0));
+      const total = gained.reduce((t, k) => t + s1[k] - s0[k], 0);
+      h += `<div class="sum" role="status"><h3>✓ Jump complete</h3><div class="big">${total > 0 ? '+' + fmt(total) : '…'} ${gained.length === 1 ? STATS[gained[0]] : 'stats'}</div>
+        <dl>${gained.map(k => `<dt>${STATS[k]}</dt><dd>${fmt(s0[k])} → ${fmt(s1[k])} (+${fmt(s1[k] - s0[k])})</dd>`).join('')}
         <dt>Happy</dt><dd>${fmt(J.preEcs)} → ${fmt(J.ecsHappy)} with Ecstasy</dd>
         <dt>Next jump</dt><dd>${W.s ? `in ${hm(W.s)} (${W.why} cooldown)` : 'ready now'}</dd></dl>
         <button class="act go" data-a="close" style="margin-top:7px">✓ Close – back to waiting</button></div>`;
@@ -486,14 +500,13 @@
         <tr><th>Data Sharing</th><td>Nobody. Nothing is sent to any other site.</td></tr>
         <tr><th>Purpose of Use</th><td>Personal happy-jump helper: show energy, happy, drug and booster cooldowns, the next-jump countdown, items needed and your gain. Nothing happens by itself – every action is one click by you.</td></tr>
         <tr><th>Key Storage &amp; Sharing</th><td>Stored only in your browser and only sent to api.torn.com. Never shared.</td></tr>
-        <tr><th>Key Access Level</th><td><b>Limited</b> – used selections: user (bars, cooldowns, battlestats, profile, money, inventory), company (profile – your job stars), torn (companies).</td></tr></table>` : ''}
+        <tr><th>Key Access Level</th><td><b>Limited</b> – used selections: user (bars, cooldowns, battlestats, profile, money, gym, inventory), company (profile – your job stars), torn (companies, gyms).</td></tr></table>` : ''}
       <hr><b>Jump setup</b> <span class="hint">(used every time)</span>
       <label>Xanax per jump ${sel('xan', [1, 2, 3, 4], cfg.xan)} <span class="hint">energy stops at 1,000 – Xanax is skipped if you already have more than 750</span></label>
       <label>Candy per jump ${sel('candy', [...new Set([24, 36, 48, maxCandy()])], cfg.candy)} <span class="hint">max ${maxCandy()} with your booster cooldown</span></label>
       <label>eDVD per jump ${sel('edvd', [...new Set([3, 4, 5, maxDvd()])], cfg.edvd)}</label>
       <label>Candy type <select data-c="ctype">${Object.entries(CANDY).map(([k, v]) => `<option value="${k}" ${cfg.ctype === k ? 'selected' : ''}>${v[0]} (+${v[1]})</option>`).join('')}</select> <span class="hint">gives +${candyH()} each</span></label>
       <label><input type="checkbox" data-c="refill" ${cfg.refill ? 'checked' : ''}> Energy refill (30 points) after the first training</label>
-      <label>Train ${sel('stat', Object.values(STATS), STATS[cfg.stat])} in a gym with <input type="number" data-c="dots" step="0.1" min="1" max="10" value="${cfg.dots}" style="width:64px"> dots <span class="hint">for Expected gain</span></label>
       <hr><label>My job <select data-c="co">${Object.entries(COS).map(([k, v]) => `<option value="${k}" ${cfg.co === k ? 'selected' : ''}>${v.n}</option>`).join('')}</select>
         ${cfg.co !== 'none' ? `★ ${sel('stars', [1, 2, 3, 4, 5, 6, 7, 8, 9, 10], cfg.stars)}` : ''}</label>
       <label><input type="checkbox" data-c="coAuto" ${cfg.coAuto ? 'checked' : ''}> Read job and stars from the API${D && D.jobName ? ` <span class="hint">(${esc(D.jobName)})</span>` : ''}</label>
@@ -529,8 +542,6 @@
     const el = ev.target, c = el.dataset && el.dataset.c; if (!c) return;
     let v = el.type === 'checkbox' ? el.checked : el.value;
     if (['xan', 'candy', 'edvd', 'stars', 'vor', 'jp'].includes(c)) v = Math.max(0, +v || 0);
-    if (c === 'dots') v = Math.max(1, Math.min(10, +v || 5));
-    if (c === 'stat') v = Object.keys(STATS).find(k => STATS[k] === v) || 'speed';
     if (c === 'co' || c === 'stars') { cfg.coAuto = false; cfg.spec = 'auto'; }
     cfg[c] = v; saveCfg(); render();
   }
