@@ -59,3 +59,18 @@ Like the script? Send a Xanax to [Toppzy [4422625]](https://www.torn.com/profile
 **Closed bazaar:** Torn's API shows no items while your bazaar is closed. The script then keeps the last known amounts and shows «Bazaar closed». Open Bazaar → Manage and the amounts and prices are read straight from Torn's page.
 
 **Torn's rules:** one click = one action. The script never saves, adds or opens anything by itself.
+
+---
+
+# Jumpy – happy-jump helper for Torn
+
+Install: [jumpy.user.js](https://raw.githubusercontent.com/skur-commits/torn-scripts/main/jumpy.user.js) (Tampermonkey, or TornPDA → Userscripts). Open it with the yellow 😊 button in Torn's chat bar (bottom right).
+
+- **Jumps:** 🎮 Console, 🍬 Candy, 📀 eDVD. Settings: Xanax / candy / eDVD per jump, candy type, energy refill, your job and stars (read from the API), Voracity, book, World Diabetes Day, eDVD finisher.
+- **Overview:** energy, expected gain, happy → target before Ecstasy with the quarter-hour tick timer, drug and booster cooldowns, **Next jump** countdown, and the items this jump needs (green = in your inventory, red = missing).
+- **▶ Start jump** – warns if items are missing. If you already have more than 750 energy, the Xanax step is skipped.
+- **Steps** – only the next step can be pressed. Jumpy follows your progress from the API (energy, happy, cooldowns, points); **✓** marks a step done yourself. A warning shows if the first happy step is too close to the next tick.
+- **Gym** – the panel shrinks to a strip with energy, happy and the next step (⚡ REFILL → Points).
+- **0.1.0:** item buttons open the Items page and mark the item – you press Torn's Use. One-click use comes when the Items page is mapped.
+
+Safety: nothing happens by itself – every action is one click by you on Torn's own pages. API key: Limited, stored only in your browser, only sent to api.torn.com (terms table in ⚙️ Settings).

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Toppzy Manager
 // @namespace    toppzy.torn
-// @version      0.3.8
+// @version      0.3.9
 // @description  Shopkeeper – bazaar manager for Torn: overview of everything in your bazaar (also sold-out items), price suggestions from the Item Market and bazaars (bazaar prices via weav3r.dev), a safety floor you choose (% of market value, shop price, price paid abroad), fixed prices per item, and changes you can prepare anywhere – even while flying. One click = one action: the script only fills fields, you always press Torn's own buttons.
 // @author       Toppzy [4422625]
 // @match        https://www.torn.com/*
@@ -20,7 +20,7 @@
 (function () {
   'use strict';
   if (window.top !== window.self) return;
-  const VERSION = '0.3.8';
+  const VERSION = '0.3.9';
 
   /* =====================================================================
    *  SETTINGS
@@ -445,7 +445,7 @@
       const id = idFromImg(li);
       const txt = li.innerText || '';
       if (/Equipped|Untradable/i.test(txt)) return null;
-      const qty = li.querySelector('.amount input:not([type=hidden])');
+      const qty = li.querySelector('.amount input:not([type=hidden]):not([type=checkbox])');   // 0.3.9: weapons/armor have a checkbox here, not an amount
       const box = li.querySelector('input[type=checkbox]');
       const hasPrice = !!li.querySelector('input.input-money');
       const nameEl = li.querySelector('.name-wrap, .t-overflow');
@@ -468,7 +468,7 @@
   async function fillAdd(mode) {
     addFilled = [];
     const rows = await addRows();
-    let n = 0, skipped = 0;
+    let n = 0, skipped = 0; const noPrice = [];
     for (const r of rows) {
       const it = items[r.id] || { id: r.id, name: r.name, type: '', floor: null, plan: {} };
       if (isNever(it.name || r.name)) continue;
@@ -483,15 +483,15 @@
       if (!(q > 0)) { skipped++; continue; }
       // already for sale → keep the bazaar's current price (prices are changed with Adjust prices); new/empty → suggestion
       const pr = (it.plan && it.plan.price) || (it.bzQty > 0 ? it.bzPrice : 0) || suggest(it, prices[r.id]) || it.bzPrice || 0;
-      if (!pr) { skipped++; continue; }                     // no price known (e.g. weapon without plan)
+      if (!pr) { skipped++; noPrice.push(it.name || r.name); continue; }   // no price known (e.g. weapon without a price)
       if (r.qty) { r.qty.focus(); setVal(r.qty, q); r.qty.blur(); }
-      else if (r.box) { if (!r.box.checked) r.box.click(); }
+      else if (r.box) { if (!r.box.checked) r.box.click(); await sleep(150); }   // 0.3.9: weapons/armor – tick Torn's checkbox
       else { skipped++; continue; }
-      if (r.hasPrice) setMoney(r.li, pr);
+      if (r.li.querySelector('input.input-money')) setMoney(r.li, pr);
       addFilled.push({ id: r.id, name: it.name || r.name, type: it.type || '', q, pr });
       mark(r.li, '#3d85c6'); n++;
     }
-    return { n, skipped };
+    return { n, skipped, noPrice };
   }
 
   // ---- Personalize page
@@ -561,9 +561,10 @@
   async function actFill() {
     if (!key) return askKey();
     if (pageMode() === 'add') {
-      const { n, skipped } = await fillAdd('fill');
+      const { n, skipped, noPrice } = await fillAdd('fill');
       hookSave(/add to bazaar/i, applyAddFilled);
-      return toast(n ? `${n} items filled${skipped ? `, ${skipped} skipped` : ''} – ${SAVE_TXT.add}.` : 'Nothing to fill with your current settings.');
+      const why = noPrice && noPrice.length ? ` Set a price (New price) for: ${noPrice.join(', ')}.` : '';
+      return toast(n ? `${n} items filled${skipped ? `, ${skipped} skipped` : ''} – ${SAVE_TXT.add}.${why}` : `Nothing to fill with your current settings.${why}`, !!why && !n);
     }
     let n = 0;
     for (const it of fillScope()) {
