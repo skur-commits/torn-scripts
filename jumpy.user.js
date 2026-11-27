@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Jumpy – Torn happy-jump helper
 // @namespace    jumpy.torn
-// @version      0.1.3
-// @description  Jumpy guides you through a happy jump (Console, Candy or eDVD): plan, happy target before Ecstasy, quarter-hour tick warning, drug/booster cooldowns, next-jump countdown, items needed and the gain after. Nothing happens by itself – every action is one click by you on Torn's own pages.
+// @version      0.1.5
+// @description  Jumpy guides you through a happy jump (Console, Candy or eDVD): plan, happy target before Ecstasy, quarter-hour tick warning, drug/booster cooldowns, next-jump countdown, items needed and the gain after. Item buttons use one item per click (the same request as Torn's own Okay button, like TornTools Quick items) – nothing happens by itself.
 // @author       Toppzy [4422625]
 // @match        https://www.torn.com/*
 // @match        https://torn.com/*
@@ -17,7 +17,7 @@
 (function () {
   'use strict';
   if (window.top !== window.self) return;
-  const VERSION = '0.1.3';
+  const VERSION = '0.1.5';
 
   /* =====================================================================
    *  STORAGE
@@ -115,7 +115,7 @@
     if (!key || busy) return;
     busy = true;
     try {
-      const u = await api('https://api.torn.com/user/?selections=bars,cooldowns,battlestats,profile,money,gym');
+      const u = await api('https://api.torn.com/user/?selections=bars,cooldowns,battlestats,profile,money,gym,jobpoints');
       const prev = D || {};
       D = Object.assign({}, prev, {
         t: Date.now(),
@@ -123,9 +123,10 @@
         happy: val(u.happy && u.happy.current), hmax: val(u.happy && u.happy.maximum) || 0,
         drug: val(u.cooldowns && u.cooldowns.drug), booster: val(u.cooldowns && u.cooldowns.booster),
         stats: { strength: val(u.strength), defense: val(u.defense), speed: val(u.speed), dexterity: val(u.dexterity) },
-        points: val(u.points), gym: +u.active_gym || 0, coId: (u.job && u.job.company_id) || 0, coType: (u.job && u.job.company_type) || 0
+        jpApi: jobPointsOf(u), points: val(u.points), gym: +u.active_gym || 0, coId: (u.job && u.job.company_id) || 0, coType: (u.job && u.job.company_type) || 0
       });
       await jobFromApi(); await fetchGyms();
+      if (D.jpApi != null && cfg.jp !== D.jpApi) { cfg.jp = D.jpApi; saveCfg(); }
       if (withInv || !D.invT || Date.now() - D.invT > 10 * 60000) await fetchInv();
       save('data', D);
       track();
@@ -134,15 +135,17 @@
     busy = false;
     render();
   }
+  // job points for your current company type (user/jobpoints)
+  function jobPointsOf(u) { const c = u.jobpoints && u.jobpoints.companies, t = u.job && u.job.company_type; if (!c || !t || !c[t]) return null; const v = c[t].jobpoints ?? c[t].points; return v == null ? null : +v; }
   async function fetchInv() {
-    const inv = {};
+    const inv = {}, ids = Object.assign({}, (D && D.ids) || {});
     for (const c of ['Drug', 'Candy', 'Booster', 'Special']) {   // Game Console is in «Special»
       try {
         const j = await api(`https://api.torn.com/v2/user/inventory?cat=${c}&limit=250`);
-        for (const it of (j.inventory && j.inventory.items) || []) { if (!it.equipped && !it.faction_owned) inv[it.name] = (inv[it.name] || 0) + (+it.amount || 0); }
+        for (const it of (j.inventory && j.inventory.items) || []) { if (!it.equipped && !it.faction_owned) { inv[it.name] = (inv[it.name] || 0) + (+it.amount || 0); if (it.id) ids[it.name] = +it.id; } }
       } catch (e) { if ([2, 7, 16].includes(e.code)) throw e; }
     }
-    D.inv = inv; D.invT = Date.now();
+    D.inv = inv; D.ids = ids; D.invT = Date.now();
   }
   // all gyms with their dots (the API stores them ×10, e.g. 73 = 7.3) – public, read once a day
   async function fetchGyms() {
@@ -220,16 +223,18 @@
     if (D.e > CAP - 250) J.ok.xan = true;
     // candy / eDVD: counted from the booster cooldown they add (30 min per candy, 6 h per eDVD, scaled by your job)
     const dB = Math.max(0, D.booster - Math.max(0, (s0.booster || 0) - Math.floor((D.t - J.t0) / 1000)));
-    if (P.t === 'edvd') J.used.dvd = Math.round(dB / (21600 * f));
+    J.loc = J.loc || {};
+    if (P.t === 'edvd') J.used.dvd = Math.max(J.loc.dvd || 0, Math.round(dB / (21600 * f)));
     else {
       const st = P.steps.find(x => x.id === 'candy'); const c = Math.round(dB / (1800 * f));
-      J.used.candy = Math.min(st.of, c);
-      if (cfg.fin) J.used.fdvd = c > st.of ? Math.round((dB - st.of * 1800 * f) / (21600 * f)) : 0;
+      J.used.candy = Math.min(st.of, Math.max(J.loc.candy || 0, c));
+      if (cfg.fin) J.used.fdvd = Math.max(J.loc.fdvd || 0, c > st.of ? Math.round((dB - st.of * 1800 * f) / (21600 * f)) : 0);
     }
     if (J.used.candy || J.used.dvd) { J.ok.xan = true; J.ok.perk = true; if (J.phase === 'stacking') J.phase = 'active'; }
     // Ecstasy: happy roughly doubles
     if (!J.ok.ecs && J.preEcs && D.happy >= J.preEcs * 1.7) { J.ok.ecs = true; J.ecsHappy = D.happy; }
     if (!J.ok.ecs) J.preEcs = D.happy;
+    if (J.ok.ecs && !J.ecsHappy && J.preEcs && D.happy >= J.preEcs * 1.5) J.ecsHappy = D.happy;
     if (J.ok.ecs && D.e < 10) J.ok.gym = true;
     if (J.ok.gym && !J.ok.ref && (D.points <= (J.ptsGym ?? D.points) - 30 || D.e >= (D.emax || 150) - 5)) J.ok.ref = true;
     if (J.ok.gym && J.ptsGym == null) J.ptsGym = D.points;
@@ -298,18 +303,36 @@
       if (st.nav === 'gym' && onGym()) { render(); return say('Train with Torn\'s buttons – Jumpy follows your energy.'); }
       return go(st.nav);
     }
-    // 0.1.0: Torn's Items page is not mapped yet – the button opens it and marks the item; you press Use yourself
-    if (!onItems()) return go('items');
-    markItem(st.item);
+    useItem(st);
   }
-  function markItem(name) {
-    document.querySelectorAll('.jpy-mark').forEach(e => e.classList.remove('jpy-mark'));
-    const cand = [...document.querySelectorAll('li[data-item], li[data-sort], .items-cont li, ul.items-cont > li')]
-      .filter(li => { const n = li.querySelector('.name, .name-wrap, [class*=name]'); return n && n.textContent.trim().toLowerCase().startsWith(name.toLowerCase()); });
-    const li = cand.find(x => x.offsetParent) || cand[0];
-    if (!li) return say(`Find «${name}» in Torn's list (open its category tab) and press Use. Use as many as the step says.`);
-    li.classList.add('jpy-mark'); li.scrollIntoView({ block: 'center', behavior: 'smooth' });
-    say(`«${name}» is marked – press Torn's Use on it. Jumpy counts from your energy, happy and cooldowns.`);
+  // One click = one item, the same request Torn's own «Okay» sends on the Items page (TornTools Quick items does the same).
+  // Console: always Hardcore (energy 5).
+  const KNOWN_IDS = { 'Xanax': 206, 'Ecstasy': 197, 'Game Console': 104, 'Bag of Chocolate Kisses': 210 };
+  const rfc = () => { const m = document.cookie.match(/(?:^|; )rfc_v=([^;]+)/); return m ? m[1] : ''; };
+  let using = false, refreshT = 0;
+  async function useItem(st) {
+    if (using) return;
+    const id = (D && D.ids && D.ids[st.item]) || KNOWN_IDS[st.item];
+    if (!id) return say(`Could not find ${st.item} in your inventory – press ⟳ and try again.`, true);
+    using = true; say(`Using ${st.item} …`);
+    const body = new URLSearchParams({ step: 'useItem', id: String(id), itemID: String(id), item: String(id) });
+    if (st.id === 'con') body.set('energy', '5');
+    let r, txt = '';
+    try { txt = await (await fetch(`https://www.torn.com/item.php?rfcv=${rfc()}`, { method: 'POST', body, credentials: 'same-origin', headers: { 'x-requested-with': 'XMLHttpRequest' } })).text(); r = JSON.parse(txt); }
+    catch (e) { using = false; return say(`Torn did not answer as expected${txt ? ': ' + txt.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 140) : ''}. Use the Items page for this one.`, true); }
+    using = false;
+    const text = String(r.text || r.msg || '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+    if (!r.success) return say(text || 'Torn said no.', true);
+    J.loc = J.loc || {}; J.used = J.used || {}; J.ok = J.ok || {};
+    J.loc[st.id] = (J.loc[st.id] || 0) + 1; J.used[st.id] = Math.max(J.used[st.id] || 0, J.loc[st.id]);
+    if (D && D.inv) D.inv[st.item] = Math.max(0, (D.inv[st.item] || 0) - (st.id === 'con' ? 0 : 1));
+    if (st.id !== 'xan') { J.ok.xan = true; if (J.phase === 'stacking') J.phase = 'active'; }
+    if (st.id === 'ecs') { J.preEcs = D ? D.happy : 0; J.ok.ecs = true; J.ecsHappy = 0; }
+    if (st.id === 'xan' && D) D.e = Math.min(CAP, D.e + 250);
+    if (st.id === 'con' && D) D.e = Math.max(0, D.e - 5);
+    saveJ(); say(text || `${st.item} used.`);
+    clearTimeout(refreshT); refreshT = setTimeout(() => refresh(false), st.id === 'candy' || st.id === 'con' ? 4000 : 1200);   // read energy/happy/cooldowns after a short pause
+    render();
   }
   function markDone(id) {
     J.ok = J.ok || {}; J.ok[id] = true;
@@ -383,10 +406,9 @@
   #jpy .adv{border:1px solid #444;border-radius:5px;padding:6px 8px;display:grid;gap:7px}#jpy .adv summary{cursor:pointer;color:#ccc}
   #jpy table.tos{border-collapse:collapse;width:100%;font-size:12px}#jpy table.tos th,#jpy table.tos td{border:1px solid #444;padding:4px 6px;text-align:left;vertical-align:top}#jpy table.tos th{color:#ffe599;font-weight:normal;white-space:nowrap}
   #jpy hr{border:0;border-top:1px solid #444;width:100%;margin:2px 0}
-  #jpy .mini{display:none;padding:6px 9px;gap:8px;align-items:center}#jpy .mini b{color:#fff}#jpy .mini .act{min-width:0;min-height:36px;margin-left:auto;padding:4px 10px}
+  #jpy .mini{display:none;padding:6px 9px;gap:8px;align-items:center;cursor:pointer}#jpy .mini:hover{background:#222}#jpy .mini b{color:#fff}#jpy .mini .act{min-width:0;min-height:36px;margin-left:auto;padding:4px 10px}
   #jpy.min{width:330px}#jpy.min .mini{display:flex}#jpy.min .body,#jpy.min header .ad{display:none}
   #jpy.setting .main{display:none}
-  .jpy-mark{outline:3px solid #f1c232 !important;outline-offset:-3px;background:rgba(241,194,50,.15) !important}
   @media (max-width:700px){#jpy{right:4px;left:4px;width:auto;top:56px}#jpy.min{width:auto}}`;
 
   function build() {
@@ -424,8 +446,12 @@
     // compact strip (gym page)
     const cur = idle || done ? null : P.steps[firstOpen];
     const lab = `<span>⚡ <b>${fmt(E())}</b>E · 😊 <b>${fmt(D ? D.happy : 0)}</b></span>`;
-    h += `<div class="mini">${cur && cur.nav === 'gym' && onGym() ? `${lab}<span style="margin-left:auto;color:#93c47d">🏋 Train here</span><button class="ok" data-a="done" data-id="${cur.id}" title="Mark this step done">✓</button>`
-      : cur ? `${lab}<button class="act ${cur.nav ? 'nav' : 'go'}" data-a="step" data-id="${cur.id}">${cur.btn}</button>` : `${lab}<span class="hint" style="margin-left:auto">▢ to open</span>`}</div>`;
+    const s0 = (J.start && J.start.stats) || {}, s1 = (J.end && J.end.stats) || {}, gainK = Object.keys(STATS).filter(k => (s1[k] || 0) > (s0[k] || 0)), gainT = gainK.reduce((t, k) => t + s1[k] - s0[k], 0);
+    const status = done ? `<span style="color:#93c47d">✓ Jump complete${gainT > 0 ? ` · +${fmt(gainT)} ${gainK.length === 1 ? STATS[gainK[0]] : 'stats'}` : ''}</span>`
+      : !key ? '<span style="color:#f1c232">Add API key</span>'
+      : W.s ? `<span>Next jump <b style="color:#e06666">${hm(W.s)}</b></span>` : '<span>Next jump <b style="color:#93c47d">Ready now</b></span>';
+    h += `<div class="mini" data-a="expand" title="Click to open Jumpy">${cur && cur.nav === 'gym' && onGym() ? `${lab}<span style="margin-left:auto;color:#93c47d">🏋 Train here</span><button class="ok" data-a="done" data-id="${cur.id}" title="Mark this step done">✓</button>`
+      : cur ? `${lab}<button class="act ${cur.nav ? 'nav' : 'go'}" data-a="step" data-id="${cur.id}">${cur.btn}</button>` : `${lab}<span style="margin-left:auto">${status}</span>`}</div>`;
     h += `<div class="body">`;
     if (setOpen) h += viewSettings();
     h += `<div class="main">`;
@@ -434,7 +460,7 @@
     if (sp.length) {
       const JP = jobPlan(), need = sp.find(x => x.n === cfg.spec) || sp[sp.length - 1];
       h += `<div class="opts">${sp.length > 1 ? `<label>Special <select data-c="spec"><option value="auto">Best for my points</option>${sp.map(x => `<option value="${esc(x.n)}" ${cfg.spec === x.n ? 'selected' : ''}>${x.n} (+${fmt(x.h)} / ${x.c} JP)</option>`).join('')}</select></label>` : ''}
-        <label>Job points <input type="number" data-c="jp" min="0" max="999" value="${cfg.jp}" style="width:70px"></label>${JP.used.length ? `<span class="hint">+${fmt(JP.h)} happy</span>` : `<span class="hint" style="color:#f1c232">${need.n} needs ${need.c} JP</span>`}</div>`;
+        ${D && D.jpApi != null ? `<span>Job points <b style="color:#fff">${cfg.jp}</b> <span class="hint">(from Torn)</span></span>` : `<label>Job points <input type="number" data-c="jp" min="0" max="999" value="${cfg.jp}" style="width:70px"></label>`}${JP.used.length ? `<span class="hint">+${fmt(JP.h)} happy</span>` : `<span class="hint" style="color:#f1c232">${need.n} needs ${need.c} JP</span>`}</div>`;
     }
     if (P.t === 'console' && !hasGamer()) h += `<div class="warnbox">⚠ <b>No Gamer perk.</b> Without a 5★ Toy Shop or Game Shop job the console gives only about half the happy. The plan puts ~30 % of your energy on the console instead of 41 %. <button data-a="set">⚙️ Job in Settings</button></div>`;
     const pct = D ? Math.min(100, J.ok && J.ok.ecs ? 100 : D.happy / Math.max(1, P.target) * 100) : 0, hot = D && D.happy > (D.hmax || 0) && toTick() < 180;
@@ -498,9 +524,9 @@
       ${!key || tosOpen ? `<table class="tos">
         <tr><th>Data Storage</th><td>Only locally in your browser (script storage). Nothing is stored anywhere else.</td></tr>
         <tr><th>Data Sharing</th><td>Nobody. Nothing is sent to any other site.</td></tr>
-        <tr><th>Purpose of Use</th><td>Personal happy-jump helper: show energy, happy, drug and booster cooldowns, the next-jump countdown, items needed and your gain. Nothing happens by itself – every action is one click by you.</td></tr>
+        <tr><th>Purpose of Use</th><td>Personal happy-jump helper: show energy, happy, drug and booster cooldowns, the next-jump countdown, items needed and your gain. Nothing happens by itself – every action is one click by you; item buttons use one item per click.</td></tr>
         <tr><th>Key Storage &amp; Sharing</th><td>Stored only in your browser and only sent to api.torn.com. Never shared.</td></tr>
-        <tr><th>Key Access Level</th><td><b>Limited</b> – used selections: user (bars, cooldowns, battlestats, profile, money, gym, inventory), company (profile – your job stars), torn (companies, gyms).</td></tr></table>` : ''}
+        <tr><th>Key Access Level</th><td><b>Limited</b> – used selections: user (bars, cooldowns, battlestats, profile, money, gym, jobpoints, inventory), company (profile – your job stars), torn (companies, gyms).</td></tr></table>` : ''}
       <hr><b>Jump setup</b> <span class="hint">(used every time)</span>
       <label>Xanax per jump ${sel('xan', [1, 2, 3, 4], cfg.xan)} <span class="hint">energy stops at 1,000 – Xanax is skipped if you already have more than 750</span></label>
       <label>Candy per jump ${sel('candy', [...new Set([24, 36, 48, maxCandy()])], cfg.candy)} <span class="hint">max ${maxCandy()} with your booster cooldown</span></label>
@@ -525,6 +551,7 @@
     switch (a) {
       case 'set': setOpen = !setOpen; return render();
       case 'min': ui.min = !ui.min; saveUi(); return render();
+      case 'expand': ui.min = false; saveUi(); return render();
       case 'ref': return refresh(true);
       case 'tos': tosOpen = !tosOpen; return render();
       case 'savekey': { const v = (document.getElementById('jpy-key').value || '').trim(); if (!/^[A-Za-z0-9]{16}$/.test(v)) return say('A Torn API key is 16 letters and numbers.', true); key = v; save('key', v); say('Key saved – reading your data …'); render(); return refresh(true); }

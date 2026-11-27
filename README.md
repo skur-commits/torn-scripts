@@ -71,6 +71,7 @@ Install: [jumpy.user.js](https://raw.githubusercontent.com/skur-commits/torn-scr
 - **▶ Start jump** – warns if items are missing. If you already have more than 750 energy, the Xanax step is skipped.
 - **Steps** – only the next step can be pressed. Jumpy follows your progress from the API (energy, happy, cooldowns, points); **✓** marks a step done yourself. A warning shows if the first happy step is too close to the next tick.
 - **Gym** – the panel shrinks to a strip with energy, happy and the next step (⚡ REFILL → Points).
-- **0.1.0:** item buttons open the Items page and mark the item – you press Torn's Use. One-click use comes when the Items page is mapped.
+- **Item buttons (0.1.5):** one click uses one item – the same request Torn's own «Okay» sends on the Items page (like TornTools Quick items). Console is always Hardcore (5E). Works from any Torn page; Torn's answer is shown in the panel.
+- **Job points** are read from the API (Limited key).
 
-Safety: nothing happens by itself – every action is one click by you on Torn's own pages. API key: Limited, stored only in your browser, only sent to api.torn.com (terms table in ⚙️ Settings).
+Safety: nothing happens by itself – one click = one action (one item, or opening one Torn page). API key: Limited, stored only in your browser, only sent to api.torn.com (terms table in ⚙️ Settings).
