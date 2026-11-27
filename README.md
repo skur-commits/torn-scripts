@@ -2,13 +2,15 @@
 
 A Tampermonkey userscript that gives you a full overview of your bazaar, suggests prices with an automatic safety floor and lets you **prepare changes anywhere (even while flying)** and **apply them in Torn with one click**.
 
-**Install:** open [toppzy-bazaar-manager.user.js](https://raw.githubusercontent.com/skur-commits/torn-scripts/main/toppzy-bazaar-manager.user.js) with Tampermonkey installed and press *Install*. Updates arrive automatically. (In Tampermonkey the script is still called «Toppzy Manager» so your key and list are kept.)
+**Install:** open [shopkeeper.user.js](https://raw.githubusercontent.com/skur-commits/torn-scripts/main/shopkeeper.user.js) with Tampermonkey installed and press *Install*. Updates arrive automatically.
+
+*(The author's own copy is `toppzy-bazaar-manager.user.js` – «Toppzy Manager» in Tampermonkey. It is the same script; `shopkeeper.user.js` is built from it with `python3 tools/make-public.py`. Moving from one to the other: ⚙ → 💾 Export, then Import in the other one.)*
 
 **TornPDA (phone):** add the same file as a userscript in TornPDA. The script sees that it runs in TornPDA, uses your PDA API key automatically and shows the phone layout (one card per item, full screen). Change it under ⚙ → 📱 Layout (Auto / Mobile / Desktop).
 
 ## Getting started
 1. Create a Torn API key with level **Limited** (Settings → API Keys). Limited is needed to read your own bazaar.
-2. Click the 🏪 button in Torn's bottom bar (next to Notes) → 🔑 → paste the key.
+2. Click the 🏪 button in Torn's bottom bar (next to Notes) → 🔑 → paste the key and press *Save key*. The Terms of Service table below is shown in the same place.
 3. Your bazaar loads into **🏪 Bazaar list**. Everything you have ever had in your bazaar stays in the list – also when it is sold out (0). Add new items under **➕ Add from inventory** (Scan now, filter by category, sort by name / amount / value).
 
 ## Simple and Advanced
@@ -23,24 +25,34 @@ A Tampermonkey userscript that gives you a full overview of your bazaar, suggest
 | 💲 Adjust all prices | Suggested price on all items – also empty ones, so the refill is priced too (your own prices are never touched) |
 | Refill to + Max | How many you want in your bazaar **in total**. Max = everything you have. «+N» shows how many will be added |
 | 🔓 / 🔒 | Open or close your bazaar (Personalize page) |
-| ⚙ (per item) | Own price strategy and floor for one item, Reset to default, Remove item |
+| ⚙ (per item) | Own price strategy, **fixed price** (📌 – always this price, e.g. Beer = $1,000) and floor for one item, Reset to default, Remove item |
 | ✕ (Advanced) | Empty item: removed from the list at once. Item for sale: asks, then removes it from your bazaar and the list |
 | ⟳ · ⚙ · 🔑 · ▁ (top right) | Refresh prices · Settings · API key · Minimize the panel (▢ restores it) |
 
 Outside the bazaar pages (or while traveling) the buttons only prepare changes. On the bazaar pages they fill in right away. The panel stays in a fixed spot at the top right, so it no longer jumps when you switch tabs. If you click while prices are still being checked, the panel shows *Waiting for the price check to finish …* and carries on by itself.
 
 ## Prices and floor
-- **Suggested** = cheapest seller (Item Market + bazaars) minus $1, by default ignoring the single cheapest listing and never below 90 % of market value (*Balanced*). Other presets: *Sell fast*, *Max profit*, *Custom*.
-- **🔒 Floor** = never sell below. Automatic on every item: the highest of **85 % of the market value** (change it in Settings), **what Torn's shops pay** and **what you paid abroad**. Set your own floor per item with ⚙ (0 = no floor). Hover 🔒 to see which one applies.
+- **Suggested** = cheapest seller (Item Market + bazaars) minus $1, by default ignoring the single cheapest listing and never below 90 % of market value (*Balanced*). Other presets: *Sell fast*, *Max profit* (the highest of market value, average bazaar price and the Balanced price, minus $1 – never lower than Balanced), *Custom*.
+- **💎 Rare items** (fewer than 5 Item Market listings, e.g. Office Chair): never priced below the cheapest Item Market listing −1 %. Bazaar averages say little for rare items. Turn off or adjust under ⚙ → Advanced. Marked *rare* in Advanced view.
+- **📌 Fixed price** (⚙ on the item): always this price – strategy, floor and the rare rule are ignored.
+- **🔒 Floor** = never sell below. Automatic on every item: the highest of **a % of the market value you choose** (85 % by default, change it in Settings), **what Torn's shops pay** and **what you paid abroad**. Set your own floor per item with ⚙ (0 = no floor). Hover 🔒 to see which one applies.
 - **Sell to shop**: when a shop pays as much as the cheapest seller, the item gets a purple status – sell it in the shop yourself.
 - A price you type yourself below the floor turns red, and ▶ Apply asks you to confirm (or use the floor price) first.
 - Weapons and armor get no automatic price (quality and bonuses vary).
 - Before applying, the script warns you if the market moved since you set the price.
 
+## Backup and moving devices
+⚙ → 💾 **Export** gives you all settings, your bazaar list, per-item settings and fixed prices as text (your API key is never included). Paste it into Shopkeeper on another browser or TornPDA and press **Import**.
+
 ## Safety
-- The script **only fills fields** – you always press *Save changes*, *Add to bazaar* or *change details* yourself.
+- The script **only fills fields** – you always press *Save changes*, *Add to bazaar*, *Confirm* or *change details* yourself.
 - Your API key is stored only in your browser (Tampermonkey) and only sent to `api.torn.com`.
 - Bazaar prices of other players come from the free service [weav3r.dev](https://weav3r.dev) (no key is sent). Can be turned off under Settings → Advanced.
+
+### Torn API – Terms of Service
+| Data Storage | Data Sharing | Purpose of Use | Key Storage & Sharing | Key Access Level |
+|---|---|---|---|---|
+| Only locally in your browser (script storage) | Nobody. Only item IDs (no key, no personal data) are sent to weav3r.dev for public bazaar prices – can be turned off | Personal bazaar management: show your bazaar, inventory and market prices and suggest prices | Stored only in your browser, only sent to api.torn.com, never shared | **Limited** – user (basic, bazaar, inventory), market (itemmarket), torn (items) |
 
 Like the script? Send a Xanax to [Toppzy [4422625]](https://www.torn.com/profiles.php?XID=4422625).
 

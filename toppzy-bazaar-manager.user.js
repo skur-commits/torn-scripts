@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Toppzy Manager
 // @namespace    toppzy.torn
-// @version      0.3.7
-// @description  Shopkeeper – bazaar manager for Torn: overview of everything in your bazaar (also sold-out items), price suggestions from Item Market + bazaars with an automatic safety floor (85 % of market, shop price, price paid abroad), prepare changes anywhere (even while flying) and apply them in Torn with one click. Only fills fields – you always press Save / Add yourself.
+// @version      0.3.8
+// @description  Shopkeeper – bazaar manager for Torn: overview of everything in your bazaar (also sold-out items), price suggestions from the Item Market and bazaars (bazaar prices via weav3r.dev), a safety floor you choose (% of market value, shop price, price paid abroad), fixed prices per item, and changes you can prepare anywhere – even while flying. One click = one action: the script only fills fields, you always press Torn's own buttons.
 // @author       Toppzy [4422625]
 // @match        https://www.torn.com/*
 // @match        https://torn.com/*
@@ -20,7 +20,7 @@
 (function () {
   'use strict';
   if (window.top !== window.self) return;
-  const VERSION = '0.3.7';
+  const VERSION = '0.3.8';
 
   /* =====================================================================
    *  SETTINGS
@@ -28,7 +28,7 @@
   const PRESETS = {
     fast:     { priceSource: 'lowestBoth', priceDelta: '-1', skipLowest: 0, minPctOfMV: 70 },
     balanced: { priceSource: 'lowestBoth', priceDelta: '-1', skipLowest: 1, minPctOfMV: 90 },
-    profit:   { priceSource: 'market',     priceDelta: '-1', skipLowest: 0, minPctOfMV: 0 }
+    profit:   { priceSource: 'best',       priceDelta: '-1', skipLowest: 1, minPctOfMV: 0 }   // 0.3.8: highest of market value, avg bazaar and Balanced
   };
   const DEF = Object.assign({
     preset: 'balanced',
@@ -44,14 +44,18 @@
     guardPct: 1,            // price guard: warn if market moved more than this %
     safetyPct: 85,          // 0.3.4: automatic floor = this % of market value (0 = off)
     view: 'simple',         // 0.3.4: simple | advanced
-    layout: 'auto'          // 0.3.6: auto | mobile | desktop
+    layout: 'auto',         // 0.3.6: auto | mobile | desktop
+    rareIM: true,           // 0.3.8: rare items (few Item Market listings) are priced from the cheapest Item Market listing
+    rareMax: 5,             // 0.3.8: «rare» = fewer than this many Item Market listings
+    rareDelta: '-1%'
   }, PRESETS.balanced);
   const SRC = {
     lowestBoth: 'Cheapest seller anywhere (Item Market or bazaar)',
     lowestIM: 'Cheapest on the Item Market',
     lowestBazaar: 'Cheapest in bazaars',
     avgBazaar: 'Average bazaar price',
-    market: 'Normal market price (market value)'
+    market: 'Normal market price (market value)',
+    best: 'Highest of market value, average bazaar and Balanced'
   };
   const UNIQUE_TYPES = ['Primary', 'Secondary', 'Melee', 'Defensive'];
   const ALL_CATS = ['Collectible', 'Clothing', 'Other', 'Tool', 'Melee', 'Defensive', 'Material', 'Car', 'Primary', 'Secondary', 'Book', 'Special', 'Supply Pack', 'Temporary', 'Enhancer', 'Artifact', 'Flower', 'Booster', 'Medical', 'Candy', 'Jewelry', 'Alcohol', 'Plushie', 'Drug', 'Energy Drink'];
@@ -66,6 +70,7 @@
   let cfg = Object.assign({}, DEF, load('cfg', {}));
   if (!Array.isArray(cfg.neverSell)) cfg.neverSell = [];
   delete cfg.addWhich;                                                   // 0.3.1: Fill up always uses my list
+  if (cfg.preset === 'profit' && cfg.priceSource === 'market') { Object.assign(cfg, PRESETS.profit); save('cfg', cfg); }   // 0.3.8: new Max profit
   if ('exclude' in cfg) { delete cfg.exclude; delete cfg.strategy; cfg.preset = 'balanced'; Object.assign(cfg, PRESETS.balanced); save('cfg', cfg); } // 0.2 → 0.3
   // TornPDA (mobile app): detected automatically. PDA replaces the placeholder below with the user's own API key.
   const IS_PDA = typeof window.flutter_inappwebview !== 'undefined' || typeof window.PDA_httpGet === 'function';
@@ -83,6 +88,7 @@
     for (const id in items) { const p = items[id].plan; if (p && p.qty > 0) p.qty += items[id].bzQty || 0; }
     save('items', items); save('ver', '0.3.4');
   }
+  for (const id in items) { const c = items[id].custom; if (c && c.name === 'profit' && c.priceSource === 'market') Object.assign(c, PRESETS.profit); }   // 0.3.8
   let prices = load('prices', {});        // id -> {t, imList, bzList, bzAvg, mv, bzOk}
   let abroad = load('abroad', {});        // id -> {cost, t}
   let bazaar = load('bazaar', { open: null, t: 0 });
@@ -216,6 +222,7 @@
       case 'lowestBazaar': return bz || im;
       case 'avgBazaar': return p.bzAvg || p.mv;
       case 'market': return p.mv;
+      case 'best': return Math.max(p.mv || 0, p.bzAvg || 0, minPos([im, bz]));
       default: return minPos([im, bz]);
     }
   }
@@ -241,11 +248,15 @@
   }
   const floorOf = it => floorInfo(it).v;
   const mobileLayout = () => cfg.layout === 'mobile' || (cfg.layout !== 'desktop' && (IS_PDA || window.innerWidth <= 700));
-  const lowPrice = it => { const pl = it.plan || {}, f = floorOf(it); return !!(pl.price && f && pl.price < f); };
+  const lowPrice = it => { const pl = it.plan || {}, f = floorOf(it); return !!(pl.price && f && pl.price < f && pl.price !== it.fixed); };
+  // 0.3.8: rare item = few listings on the Item Market → bazaar averages say little, price from the cheapest Item Market listing
+  const isRare = (it, p) => !!(cfg.rareIM && p && !(it && it.custom) && p.imList && p.imList.length > 0 && p.imList.length < (+cfg.rareMax || 5));
   function suggest(it, p) {
+    if (it && it.fixed > 0) return it.fixed;                       // 0.3.8: fixed price always wins
     if (!p || isUnique(it)) return 0;
     const s = strategyOf(it);
     let v = Math.round(applyDelta(basePrice(p, s), s.priceDelta));
+    if (isRare(it, p)) v = Math.max(v, Math.round(applyDelta(p.imList[0], cfg.rareDelta || '-1%')));
     if (+s.minPctOfMV && p.mv && v < p.mv * s.minPctOfMV / 100) v = Math.round(p.mv * s.minPctOfMV / 100);
     const f = floorOf(it);
     if (f && v < f) v = f;
@@ -258,6 +269,7 @@
     const shop = shopOf(it), lo0 = lowestOther(p);
     if (!isUnique(it) && shop && lo0 && lo0 <= shop && (it.bzQty > 0 || it.inv > 0)) return { k: 'shop', txt: `Sell to shop ${fmt(shop)}`, col: '#b48ae0' };
     if (!it.bzQty) return { k: 'sold', txt: 'Sold out' + (it.inv > 0 ? ` · ${it.inv} in inv` : '') + (it.soldOutAt ? ` · ${ago(it.soldOutAt)}` : ''), col: '#3d85c6' };
+    if (it.fixed > 0) return { k: 'ok', txt: 'Fixed price', col: '#999' };
     if (isUnique(it)) return { k: 'ok', txt: 'Manual price', col: '#999' };
     const lo = lowestOther(p);
     if (lo && it.bzPrice > lo) return { k: 'under', txt: 'Undercut', col: '#e6b800' };
@@ -732,6 +744,7 @@
   #tbm.min{height:auto !important}
   #tbm.min > .bar, #tbm.min > .body.main{display:none !important}
   #tbm .flow .q{color:#ffe599}
+  #tbm table.tos{width:100%;margin-top:4px}#tbm table.tos th{text-align:left;white-space:nowrap;vertical-align:top;color:#ffe599;padding-right:10px}#tbm table.tos td{white-space:normal;color:#ddd}
   #tbm *{box-sizing:border-box}
   #tbm header{display:flex;align-items:center;gap:6px;padding:7px 9px;border-bottom:1px solid #333;flex-wrap:wrap}
   #tbm header .ttl{font-size:14px;color:#fff;font-weight:bold}
@@ -874,11 +887,28 @@
     const n = Object.values(items).filter(it => ['under', 'sold', 'shop'].includes(status(it).k)).length;
     const e = document.querySelector('#tbm-btn .tbm-badge'); if (e) { e.textContent = n; e.style.display = n ? 'block' : 'none'; }
   }
-  function askKey() {
-    const k = (prompt('Paste your own Torn API key – level LIMITED (needed to read your bazaar). It is stored only in your browser and only sent to api.torn.com:') || '').trim();
-    if (!k) return;
-    if (k.length !== 16) { alert('A Torn API key is 16 characters.'); return; }
-    key = k; save('key', k); me = 0; save('me', 0); refresh(false, true);
+  function askKey() { if (tab !== 'key') { if (tab !== 'set') lastTab = tab; tab = 'key'; } else tab = lastTab || 'items'; openPanel(); }
+  function saveKey() {
+    const inp = document.getElementById('tbm-key'); const k = (inp && inp.value || '').trim();
+    if (!/^[A-Za-z0-9]{16}$/.test(k)) return toast('A Torn API key is 16 letters and numbers.', true);
+    key = k; save('key', k); me = 0; save('me', 0); tab = 'items'; render(); refresh(false, true);
+  }
+  // 0.3.8: Torn API Terms of Service – shown where the key is entered
+  function viewKey() {
+    const masked = key ? key.slice(0, 4) + '••••••••' + key.slice(-4) : '';
+    return `<div class="set">
+      <h4>🔑 Your Torn API key</h4>
+      <div class="q">${key ? `Saved key: <b style="color:#fff">${masked}</b>${IS_PDA && key === pdaKey() ? ' <span class="hint">(from TornPDA)</span>' : ''} · <a data-a="delkey">remove key</a><br>` : ''}
+        <input id="tbm-key" type="password" autocomplete="off" placeholder="16 characters" style="width:200px"> <button class="g" data-a="savekey">Save key</button>
+        <div class="hint" style="margin-top:4px">Create a <b>Limited</b> key in Torn: Settings → API Keys (<a href="https://www.torn.com/preferences.php#tab=api" target="_blank">open</a>). Use a separate key just for Shopkeeper, so you can delete it at any time.</div></div>
+      <h4>Torn API – Terms of Service</h4>
+      <table class="tos">
+        <tr><th>Data Storage</th><td>Only locally in your browser (script storage). Nothing is stored anywhere else.</td></tr>
+        <tr><th>Data Sharing</th><td>Nobody. Only item IDs (no key, no personal data) are sent to <b>weav3r.dev</b> to read public bazaar prices – you can turn this off under Settings → Advanced.</td></tr>
+        <tr><th>Purpose of Use</th><td>Personal bazaar management: show your bazaar, inventory and market prices, and suggest prices. The script only fills fields – you press Torn's buttons.</td></tr>
+        <tr><th>Key Storage &amp; Sharing</th><td>Stored only in your browser and only sent to api.torn.com. Never shared.</td></tr>
+        <tr><th>Key Access Level</th><td><b>Limited</b> – used selections: user (basic, bazaar, inventory), market (itemmarket), torn (items).</td></tr>
+      </table></div>`;
   }
 
   function render() {
@@ -907,7 +937,7 @@
         <span class="seg"><button data-a="view" data-v="simple" class="${simple ? 'on' : ''}" title="Only the main numbers">Simple</button><button data-a="view" data-v="advanced" class="${simple ? '' : 'on'}" title="All prices and details">Advanced</button></span>
         ${bz}
         <button data-a="refresh" class="rf" title="Refresh prices – reloads your bazaar, inventory and fresh Item Market + bazaar prices for every item in your bazaar list"><span class="rfi">⟳</span> ${ago(lastRun)}</button>
-        <button data-a="settings" class="ico gear-btn ${tab === 'set' ? 'on' : ''}" title="Settings">⚙️</button><button data-a="key" class="ico" title="API key">🔑</button><button data-a="min" class="ico" title="${minimized ? 'Show the whole panel' : 'Minimize – see the Torn page; Save/Add/Confirm buttons stay visible'}">${minimized ? '▢' : '▁'}</button><button data-a="close" class="ico" title="Close">✕</button>
+        <button data-a="settings" class="ico gear-btn ${tab === 'set' ? 'on' : ''}" title="Settings">⚙️</button><button data-a="key" class="ico ${tab === 'key' ? 'on' : ''}" title="API key and Terms of Service">🔑</button><button data-a="min" class="ico" title="${minimized ? 'Show the whole panel' : 'Minimize – see the Torn page; Save/Add/Confirm buttons stay visible'}">${minimized ? '▢' : '▁'}</button><button data-a="close" class="ico" title="Close">✕</button>
       </header>
       <div class="bar">
         <button data-a="apply" class="g" ${c.total ? '' : 'disabled'} title="Open the right bazaar page and fill in all your changes. You press Save / Add yourself.">▶ Apply${c.total ? ` (${c.total})` : ''}</button>
@@ -928,9 +958,9 @@
         ${tab === 'items' ? `<span class="sp hint">Show:</span>
           <button data-f="all" class="${filter === 'all' ? 'on' : ''}">All (${all.length})</button>
           <button data-f="sale" class="${filter === 'sale' ? 'on' : ''}">For sale (${forSale})</button>
-          <button data-f="empty" class="${filter === 'empty' ? 'on' : ''}">Empty (${empty})</button>` : tab === 'set' ? '<span class="sp hint">⚙ Settings – press ⚙ again to go back</span>' : ''}
+          <button data-f="empty" class="${filter === 'empty' ? 'on' : ''}">Empty (${empty})</button>` : tab === 'set' ? '<span class="sp hint">⚙ Settings – press ⚙ again to go back</span>' : tab === 'key' ? '<span class="sp hint">🔑 API key – press 🔑 again to go back</span>' : ''}
       </div>
-      <div class="body main">${tab === 'items' ? viewItems() : tab === 'inv' ? viewInv() : viewSet()}</div>
+      <div class="body main">${tab === 'items' ? viewItems() : tab === 'inv' ? viewInv() : tab === 'key' ? viewKey() : viewSet()}</div>
       <div class="foot"><span>In bazaar: <b style="color:#fff">${fmt(value)}</b></span>
         ${c.total ? `<span>Pending: ${[c.price && c.price + ' price' + (c.price > 1 ? 's' : ''), c.qty && c.qty + ' refill' + (c.qty > 1 ? 's' : ''), c.rem && c.rem + ' removal' + (c.rem > 1 ? 's' : ''), c.bz && 'bazaar ' + planBazaar].filter(Boolean).join(' · ')} · <a data-a="clearplan">clear changes</a></span>` : ''}
         <span id="tbm-msg" class="msg${msgErr ? ' err' : ''}">${esc(msg)}</span></div>`;
@@ -963,6 +993,7 @@
         else if (PRESETS[e.value]) it.custom = Object.assign({ name: e.value }, PRESETS[e.value]);
         else { const b = it.custom || strategyOf(null); it.custom = { name: 'custom', priceSource: b.priceSource, priceDelta: b.priceDelta, skipLowest: b.skipLowest, minPctOfMV: b.minPctOfMV }; }
       } else if (k === 'floor') { const v = e.value.trim(); it.floor = v === '' ? null : num(v); }
+      else if (k === 'fixed') { const v = num(e.value); it.fixed = v > 0 ? v : null; }
       else if (it.custom) { it.custom[k] = typeof DEF[k] === 'number' ? num(e.value) : e.value; }
       persist(); savedTick(); render();
     });
@@ -972,11 +1003,12 @@
     };
     const gsel = w.querySelectorAll('select[id^="tbm-g-"]'); gsel.forEach(s => s.onchange = () => { guardState.choice[s.id.slice(6)] = s.value; });
     const nv = w.querySelector('#tbm-never'); if (nv) nv.onkeydown = ev => { if (ev.key === 'Enter') act('neveradd'); };
+    const ki = w.querySelector('#tbm-key'); if (ki) ki.onkeydown = ev => { if (ev.key === 'Enter') saveKey(); };
   }
   function savedTick() { msg = '✓ Saved'; msgErr = false; setTimeout(() => { if (msg === '✓ Saved') { msg = ''; const e = document.getElementById('tbm-msg'); if (e) e.textContent = ''; } }, 1500); }
 
   function viewItems() {
-    if (!key) return '<p>Press 🔑 and paste a <b>Limited</b> API key to start.</p>';
+    if (!key) return viewKey();
     let list = Object.values(items);
     if (filter === 'sale') list = list.filter(t => t.bzQty > 0);
     if (filter === 'empty') list = list.filter(t => !t.bzQty);
@@ -996,8 +1028,8 @@
         const p = prices[it.id] || {}, s = status(it), pl = it.plan || {}, sug = suggest(it, prices[it.id]);
         const fi = floorInfo(it), uniq = isUnique(it), low = lowPrice(it);
         const cls = pl.remove ? 'removing' : (pl.price || pl.qty) ? 'planned' : '';
-        const gear = `<td><a class="gear ${it.custom || it.floor != null ? 'custom' : ''}" data-a="card" data-id="${it.id}" title="Settings for this item">⚙</a></td>`;
-        const name = `<td><a href="https://www.torn.com/page.php?sid=ItemMarket#/market/view=search&itemID=${it.id}" target="_blank">${esc(it.name || it.id)}</a>${fi.v ? ` <span class="lock" title="Floor ${fmt(fi.v)} – ${fi.why}. Suggested prices never go below this.">🔒</span>` : ''}${!simple && it.custom ? ' <span class="hint" title="Own price strategy">★</span>' : ''}</td>`;
+        const gear = `<td><a class="gear ${it.custom || it.floor != null || it.fixed > 0 ? 'custom' : ''}" data-a="card" data-id="${it.id}" title="Settings for this item">⚙</a></td>`;
+        const name = `<td><a href="https://www.torn.com/page.php?sid=ItemMarket#/market/view=search&itemID=${it.id}" target="_blank">${esc(it.name || it.id)}</a>${fi.v ? ` <span class="lock" title="Floor ${fmt(fi.v)} – ${fi.why}. Suggested prices never go below this.">🔒</span>` : ''}${it.fixed > 0 ? ` <span class="hint" title="Fixed price ${fmt(it.fixed)} – set with ⚙">📌</span>` : ''}${!simple && it.custom ? ' <span class="hint" title="Own price strategy">★</span>' : ''}${!simple && isRare(it, p) ? ' <span class="hint" title="Rare: few Item Market listings – priced from the cheapest Item Market listing (Settings → Advanced)">rare</span>' : ''}</td>`;
         const lowTxt = low ? `<div class="lowtxt">below floor ${fmt(fi.v)} (${fi.why})</div>` : '';
         const cpInput = `<input class="cp ${pl.price ? 'set' : ''} ${low ? 'low' : ''}" data-id="${it.id}" value="${pl.price ? pl.price.toLocaleString('en-US') : ''}" placeholder="new price">${pl.price ? ` <button class="mini" data-a="undo" data-id="${it.id}" title="Undo">↺</button>` : ''}`;
         // Refill to N = N in the bazaar in total
@@ -1021,7 +1053,7 @@
           <td class="n opt" title="Checked ${ago(p.t)} (Torn may cache up to 1 h)">${fmt(nth(p.imList, 0))}${p.t ? `<div class="hint">${ago(p.t)}</div>` : ''}</td>
           <td class="n opt">${p.t && cfg.useWeav3r && p.bzOk === false ? '<span class="hint" title="weav3r.dev did not answer – Item Market only">n/a</span>' : fmt(nth(p.bzList, 0))}</td>
           <td class="n opt">${fmt(p.bzAvg)}</td><td class="n opt">${fmt(mvOf(it))}</td>
-          <td class="n">${uniq ? '<span class="hint" title="Weapons/armor: quality and bonuses vary – set the price yourself">manual</span>' : `<b style="color:#fff">${fmt(sug)}</b>${sug ? ` <button class="mini" data-a="usesug" data-id="${it.id}" title="Copy suggested into Change price">⇐</button>` : ''}`}</td>
+          <td class="n">${uniq && !(it.fixed > 0) ? '<span class="hint" title="Weapons/armor: quality and bonuses vary – set the price yourself">manual</span>' : `<b style="color:#fff">${fmt(sug)}</b>${sug ? ` <button class="mini" data-a="usesug" data-id="${it.id}" title="Copy suggested into Change price">⇐</button>` : ''}`}</td>
           <td>${cpInput}${pl.price ? `<div class="hint">${it.bzQty ? `${fmt(it.bzPrice)} → ${fmt(pl.price)}` : `new: ${fmt(pl.price)}${add ? ' × ' + add : ''}`}${pl.locked ? '' : ' (auto)'}</div>` : ''}${lowTxt}</td>
           <td>${refill}</td>
           <td>${st}</td>
@@ -1038,7 +1070,7 @@
     const add = addOf(it), hasQ = pl.qty > 0;
     const showSug = !pl.price && !uniq && s.k !== 'shop' && sug && sug !== (it.bzQty ? it.bzPrice : 0);
     return `<div class="it ${cls}">
-      <div class="r1"><a class="gear ${it.custom || it.floor != null ? 'custom' : ''}" data-a="card" data-id="${it.id}" title="Settings for this item">⚙</a>
+      <div class="r1"><a class="gear ${it.custom || it.floor != null || it.fixed > 0 ? 'custom' : ''}" data-a="card" data-id="${it.id}" title="Settings for this item">⚙</a>
         <span class="nm"><a href="https://www.torn.com/page.php?sid=ItemMarket#/market/view=search&itemID=${it.id}" target="_blank">${esc(it.name || it.id)}</a>${fi.v ? ` <span class="lock" title="Floor ${fmt(fi.v)} – ${fi.why}">🔒</span>` : ''}</span>
         <span class="st" style="background:${pl.remove ? '#e06666' : s.col}">${pl.remove ? 'Removing' : esc(s.txt)}</span>
         <a class="x" data-a="remove" data-id="${it.id}" title="Remove from bazaar and list">✕</a></div>
@@ -1070,6 +1102,8 @@
           <div><label>Change ($ or %)</label><input data-card="priceDelta" data-id="${it.id}" value="${esc(s.priceDelta)}" style="width:60px"></div>
           <div><label>Ignore cheapest</label><input data-card="skipLowest" data-id="${it.id}" value="${s.skipLowest}" style="width:40px"></div>
           <div><label>Never below % of market</label><input data-card="minPctOfMV" data-id="${it.id}" value="${s.minPctOfMV}" style="width:45px"></div>` : ''}
+        <div><label>Fixed price – always <span class="info" title="Always use this price for ${esc(it.name)} – the strategy, floor and rare-item rule are ignored. Empty = off.">ⓘ</span></label>
+          <input data-card="fixed" data-id="${it.id}" value="${it.fixed > 0 ? it.fixed.toLocaleString('en-US') : ''}" placeholder="off" style="width:100px" inputmode="numeric"></div>
         <div><label>Floor – never sell below <span class="info" title="Empty = automatic: the highest of ${+cfg.safetyPct || 0} % of market value, the shop price and the price you paid abroad. 0 = no floor.">ⓘ</span></label>
           <input data-card="floor" data-id="${it.id}" value="${it.floor != null ? it.floor : ''}" placeholder="${fa.v ? 'auto ' + fmt(fa.v) : 'none'}" style="width:100px"></div>
         <div><button data-a="resetitem" data-id="${it.id}">↺ Reset to default</button></div>
@@ -1161,13 +1195,24 @@
     return `Example – <b>${esc(it.name)}</b>: ${what} ${fmt(base)} → your price <b style="color:#fff">${fmt(suggest(Object.assign({}, it, { custom: null }), p))}</b>`;
   }
 
+  function importData() {
+    const ta = document.getElementById('tbm-io'); let d;
+    try { d = JSON.parse((ta && ta.value || '').trim()); } catch (e) { return toast('That is not a Shopkeeper backup.', true); }
+    if (!d || !d.cfg || !d.items) return toast('That is not a Shopkeeper backup.', true);
+    if (!confirm(`Import ${Object.keys(d.items).length} items and all settings? Your current list and settings are replaced.`)) return;
+    cfg = Object.assign({}, DEF, d.cfg); if (!Array.isArray(cfg.neverSell)) cfg.neverSell = [];
+    items = d.items; if (d.abroad) { abroad = d.abroad; save('abroad', abroad); }
+    for (const id in items) items[id].plan = {};
+    save('cfg', cfg); persist(); tab = 'items'; render(); toast('✓ Imported – press ⟳ to load fresh prices.');
+  }
+
   function viewSet() {
     const pre = (k, ico, label, sub) => `<button data-a="preset" data-p="${k}" class="${cfg.preset === k ? 'on' : ''}" title="${sub}">${ico} ${label}${k === 'balanced' ? ' (recommended)' : ''}</button>`;
     const o = (k, v, l) => `<option value="${v}" ${String(cfg[k]) === String(v) ? 'selected' : ''}>${l}</option>`;
     const deltaChoice = ['-1', '-1%', '0'].includes(String(cfg.priceDelta)) ? String(cfg.priceDelta) : 'other';
-    const customCount = Object.values(items).filter(t => t.custom || t.floor != null).length;
+    const customCount = Object.values(items).filter(t => t.custom || t.floor != null || t.fixed > 0).length;
     const sp = +cfg.safetyPct || 0;
-    const desc = { fast: `$1 under the cheapest seller. Never below 70 % of the market price${sp > 70 ? ` (your safety floor of ${sp} % wins)` : ''}.`, balanced: `$1 under the cheapest seller, but ignores the single cheapest listing and never goes below 90 % of the market price${sp > 90 ? ` (your safety floor of ${sp} % wins)` : ''}.`, profit: 'Market price − $1. Highest price, sells slower.', custom: 'You choose everything below.' };
+    const desc = { fast: `$1 under the cheapest seller. Never below 70 % of the market price${sp > 70 ? ` (your safety floor of ${sp} % wins)` : ''}.`, balanced: `$1 under the cheapest seller, but ignores the single cheapest listing and never goes below 90 % of the market price${sp > 90 ? ` (your safety floor of ${sp} % wins)` : ''}.`, profit: 'The highest of market value, average bazaar price and the Balanced price, minus $1. Highest price, sells slower.', custom: 'You choose everything below.' };
     return `<div class="set">
       <div class="q"><div>📱 Layout <span class="info" title="Auto = cards on phones and in TornPDA, table on a computer.">ⓘ</span></div>
         <select data-set="layout">${o('layout', 'auto', `Auto (now: ${mobileLayout() ? 'mobile' : 'desktop'}${IS_PDA ? ', TornPDA' : ''})`)}${o('layout', 'mobile', 'Mobile – cards')}${o('layout', 'desktop', 'Desktop – table')}</select></div>
@@ -1207,7 +1252,14 @@
         <div class="q"><div>Warn before Apply if the market moved more than</div><input data-set="guardPct" value="${cfg.guardPct}" style="width:50px"> %</div>
         <div class="q"><div>Max Torn API calls per minute</div><input data-set="tornPerMin" value="${cfg.tornPerMin}" style="width:50px"> <span class="hint">Torn allows 100 per minute for your whole account</span></div>
         <div class="q"><label style="color:#ccc"><input type="checkbox" data-set="useWeav3r" ${cfg.useWeav3r ? 'checked' : ''}> Use bazaar prices from weav3r.dev</label> <span class="hint">free service, your key is never sent there</span></div>
+        <div class="q"><div>💎 Rare items <span class="info" title="Items with few Item Market listings (e.g. Office Chair, Grinding Stone) often sell far below the Item Market when priced from bazaar averages. With this on, their suggestion is never lower than the cheapest Item Market listing with the change you choose. Items with their own strategy (⚙) are not affected.">ⓘ</span></div>
+          <label style="color:#ccc"><input type="checkbox" data-set="rareIM" ${cfg.rareIM ? 'checked' : ''}> Price from the cheapest Item Market listing</label>
+          when fewer than <input data-set="rareMax" value="${cfg.rareMax}" style="width:40px"> listings, change <input data-set="rareDelta" value="${esc(cfg.rareDelta)}" style="width:55px"> <span class="hint">e.g. -1%, -1</span></div>
       </details>
+
+      <h4>💾 Backup / move to another device <span class="info" title="Export copies your settings, bazaar list, per-item settings and fixed prices as text. Paste it into Shopkeeper on another browser, TornPDA or a new install and press Import. Your API key is never included.">ⓘ</span></h4>
+      <div class="q"><textarea id="tbm-io" rows="3" style="width:100%;box-sizing:border-box;background:#111;color:#ddd;border:1px solid #444;font:11px monospace" placeholder="Press Export, or paste a backup here and press Import"></textarea>
+        <div style="margin-top:4px;display:flex;gap:6px"><button data-a="export">⬆ Export</button><button data-a="import" class="y">⬇ Import</button></div></div>
 
       <div class="danger"><h4>Danger zone</h4>
         <button data-a="resetall" class="r">Reset all items to default (${customCount})</button>
@@ -1225,8 +1277,12 @@
       case 'refresh': return refresh(false, true);
       case 'scan': return refresh(true, false);
       case 'key': return askKey();
+      case 'savekey': return saveKey();
+      case 'delkey': if (confirm('Remove the saved API key from this browser?')) { key = ''; save('key', ''); me = 0; save('me', 0); render(); } return;
+      case 'export': { const ta = document.getElementById('tbm-io'); if (ta) { ta.value = JSON.stringify({ shopkeeper: VERSION, cfg, items, abroad }); ta.select(); toast('Copy the text in the box (your API key is not included).'); } return; }
+      case 'import': return importData();
       case 'view': cfg.view = el.dataset.v; save('cfg', cfg); openCard = null; return render();
-      case 'settings': if (tab === 'set') tab = lastTab || 'items'; else { lastTab = tab; tab = 'set'; } return render();
+      case 'settings': if (tab === 'set') tab = lastTab || 'items'; else { if (tab !== 'key') lastTab = tab; tab = 'set'; } return render();
       case 'apply': return actApply(false);
       case 'max': { const it = items[id]; const n = (it.bzQty || 0) + (it.inv || 0); if (n > 0) P(it).qty = n; persist(); return render(); }
       case 'lowfix': { for (const it of lowState.items) { const f = floorOf(it); if (f) setPlanPrice(it, f, true); } lowState = null; persist(); render(); return actApply(true); }
@@ -1244,8 +1300,8 @@
       case 'usesug': { const it = items[id]; setPlanPrice(it, suggest(it, prices[id]), true); persist(); return render(); }
       case 'undo': { const it = items[id]; setPlanPrice(it, 0); persist(); return render(); }
       case 'remove': return actRemove(id);
-      case 'resetitem': { const it = items[id]; if (confirm(`Reset ${it.name} to default settings?`)) { it.custom = null; it.floor = null; persist(); render(); } return; }
-      case 'resetall': { const n = Object.values(items).filter(t => t.custom || t.floor != null).length; if (!n) return toast('No items have their own settings.'); if (confirm(`Reset ${n} items with custom settings to default?`)) { for (const t of Object.values(items)) { t.custom = null; t.floor = null; } persist(); render(); } return; }
+      case 'resetitem': { const it = items[id]; if (confirm(`Reset ${it.name} to default settings?`)) { it.custom = null; it.floor = null; it.fixed = null; persist(); render(); } return; }
+      case 'resetall': { const n = Object.values(items).filter(t => t.custom || t.floor != null || t.fixed > 0).length; if (!n) return toast('No items have their own settings.'); if (confirm(`Reset ${n} items with custom settings (incl. fixed prices) to default?`)) { for (const t of Object.values(items)) { t.custom = null; t.floor = null; t.fixed = null; } persist(); render(); } return; }
       case 'clearlist': if (confirm('Clear the whole item list? (Your bazaar in Torn is not changed.)')) { items = {}; prices = {}; persist(); render(); } return;
       case 'preset': { const p = el.dataset.p; cfg.preset = p; if (PRESETS[p]) Object.assign(cfg, PRESETS[p]); save('cfg', cfg); savedTick(); return render(); }
       case 'neveradd': { const inp = document.getElementById('tbm-never'); const v = (inp && inp.value || '').trim(); if (v && !isNever(v)) { cfg.neverSell.push(v); save('cfg', cfg); savedTick(); render(); } return; }
