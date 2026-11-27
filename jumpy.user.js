@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Jumpy – Torn happy-jump helper
 // @namespace    jumpy.torn
-// @version      0.1.2
+// @version      0.1.3
 // @description  Jumpy guides you through a happy jump (Console, Candy or eDVD): plan, happy target before Ecstasy, quarter-hour tick warning, drug/booster cooldowns, next-jump countdown, items needed and the gain after. Nothing happens by itself – every action is one click by you on Torn's own pages.
 // @author       Toppzy [4422625]
 // @match        https://www.torn.com/*
@@ -17,7 +17,7 @@
 (function () {
   'use strict';
   if (window.top !== window.self) return;
-  const VERSION = '0.1.2';
+  const VERSION = '0.1.3';
 
   /* =====================================================================
    *  STORAGE
@@ -136,7 +136,7 @@
   }
   async function fetchInv() {
     const inv = {};
-    for (const c of ['Drug', 'Candy', 'Booster', 'Other']) {
+    for (const c of ['Drug', 'Candy', 'Booster', 'Special']) {   // Game Console is in «Special»
       try {
         const j = await api(`https://api.torn.com/v2/user/inventory?cat=${c}&limit=250`);
         for (const it of (j.inventory && j.inventory.items) || []) { if (!it.equipped && !it.faction_owned) inv[it.name] = (inv[it.name] || 0) + (+it.amount || 0); }
