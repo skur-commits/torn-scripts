@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Jumpy – Torn happy-jump helper
 // @namespace    jumpy.torn
-// @version      0.1.0
+// @version      0.1.1
 // @description  Jumpy guides you through a happy jump (Console, Candy or eDVD): plan, happy target before Ecstasy, quarter-hour tick warning, drug/booster cooldowns, next-jump countdown, items needed and the gain after. Nothing happens by itself – every action is one click by you on Torn's own pages.
 // @author       Toppzy [4422625]
 // @match        https://www.torn.com/*
@@ -17,7 +17,7 @@
 (function () {
   'use strict';
   if (window.top !== window.self) return;
-  const VERSION = '0.1.0';
+  const VERSION = '0.1.1';
 
   /* =====================================================================
    *  STORAGE
@@ -312,11 +312,13 @@
   /* =====================================================================
    *  UI
    * ===================================================================*/
-  const SMILE = `<svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true"><circle cx="12" cy="12" r="10.5" fill="#f1c232" stroke="#fff" stroke-width="2"/><circle cx="8.6" cy="9.6" r="1.4" fill="#222"/><circle cx="15.4" cy="9.6" r="1.4" fill="#222"/><path d="M7.4 13.6c1.1 2.2 2.6 3.2 4.6 3.2s3.5-1 4.6-3.2" fill="none" stroke="#222" stroke-width="1.7" stroke-linecap="round"/></svg>`;
+  // white line icon on a yellow gradient – same look as Torn's other chat-bar buttons (rounded top, 38×38)
+  const SMILE = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M8 14.2c1 1.7 2.3 2.5 4 2.5s3-.8 4-2.5"/><path d="M9 9.6v.6M15 9.6v.6" stroke-width="2.4"/></svg>`;
   const CSS = `
-  #jpy-btn{position:relative;background:#f1c232 !important;border:2px solid #fff !important;border-radius:50% !important;display:inline-flex;align-items:center;justify-content:center;padding:0 !important}
-  #jpy-btn:hover{background:#ffd966 !important}
-  #jpy-btn.jpy-float{position:fixed;right:14px;bottom:184px;z-index:999999;width:44px;height:44px;cursor:pointer;box-shadow:0 2px 10px #000a}
+  #jpy-btn{position:relative;background:linear-gradient(#e8b923,#8a6500) !important;color:#fff !important}
+  #jpy-btn:hover{background:linear-gradient(#f5cc45,#a37a08) !important}
+  #jpy-btn svg{stroke:#fff !important;fill:none !important;color:#fff !important}#jpy-btn svg *{stroke:#fff !important;fill:none !important}
+  #jpy-btn.jpy-float{position:fixed;right:14px;bottom:184px;z-index:999999;width:44px;height:44px;border:0;border-radius:6px;cursor:pointer;box-shadow:0 2px 10px #000a;display:flex;align-items:center;justify-content:center}
   #jpy-btn .dot{position:absolute;top:-4px;right:-4px;width:10px;height:10px;border-radius:50%;background:#6aa84f;border:1.5px solid #fff;display:none}
   #jpy-btn.run .dot{display:block}
   #jpy{position:fixed;right:8px;top:62px;z-index:999999;width:440px;max-width:calc(100vw - 16px);max-height:calc(100vh - 116px);overflow-y:auto;overscroll-behavior:contain;display:none;flex-direction:column;background:#1b1b1b;color:#ddd;font:13px/1.4 Arial,sans-serif;border:2px solid #f1c232;border-radius:8px;box-shadow:0 6px 20px #000c;text-align:left}
@@ -385,6 +387,7 @@
       b = document.createElement('button'); b.type = 'button'; b.id = 'jpy-btn'; b.title = 'Jumpy – happy jump';
       b.className = ref.className;                                         // borrow Torn's size/spacing at runtime
       b.innerHTML = SMILE + '<span class="dot"></span>';
+      const svg = ref.querySelector('svg'); if (svg && svg.getAttribute('class')) b.querySelector('svg').setAttribute('class', svg.getAttribute('class'));
       ref.parentElement.insertBefore(b, ref); b.onclick = toggle;
     } else if (!ref && !b) {
       b = document.createElement('button'); b.type = 'button'; b.id = 'jpy-btn'; b.title = 'Jumpy – happy jump'; b.className = 'jpy-float';
