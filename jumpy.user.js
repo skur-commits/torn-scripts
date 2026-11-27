@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Jumpy – Torn happy-jump helper
 // @namespace    jumpy.torn
-// @version      0.1.5
+// @version      0.1.6
 // @description  Jumpy guides you through a happy jump (Console, Candy or eDVD): plan, happy target before Ecstasy, quarter-hour tick warning, drug/booster cooldowns, next-jump countdown, items needed and the gain after. Item buttons use one item per click (the same request as Torn's own Okay button, like TornTools Quick items) – nothing happens by itself.
 // @author       Toppzy [4422625]
 // @match        https://www.torn.com/*
@@ -17,7 +17,7 @@
 (function () {
   'use strict';
   if (window.top !== window.self) return;
-  const VERSION = '0.1.5';
+  const VERSION = '0.1.6';
 
   /* =====================================================================
    *  STORAGE
@@ -81,7 +81,7 @@
   const CN = () => (CANDY[cfg.ctype] || CANDY.kiss)[0];
   const candyH = () => Math.round((CANDY[cfg.ctype] || CANDY.kiss)[1] * candyMult()), dvdH = () => has('indecent') ? 5000 : 2500;
   const maxCandy = () => Math.floor(1440 / (30 * boostF())) + 1, maxDvd = () => Math.floor(1440 / (360 * boostF())) + 1;   // one item may take you over 24h
-  function jobPlan() { let jp = cfg.jp, h = 0; const used = []; for (const x of specials().filter(x => cfg.spec === 'auto' || x.n === cfg.spec)) { const k = Math.floor(jp / x.c); if (k) { h += k * x.h; jp -= k * x.c; used.push(`${k}× ${x.n}`); } } return { h, used }; }
+  function jobPlan() { let jp = J && J.phase !== 'idle' && J.jp != null ? J.jp : cfg.jp, h = 0; const used = []; for (const x of specials().filter(x => cfg.spec === 'auto' || x.n === cfg.spec)) { const k = Math.floor(jp / x.c); if (k) { h += k * x.h; jp -= k * x.c; used.push(`${k}× ${x.n}`); } } return { h, used }; }
 
   /* =====================================================================
    *  HELPERS
@@ -129,7 +129,7 @@
       if (D.jpApi != null && cfg.jp !== D.jpApi) { cfg.jp = D.jpApi; saveCfg(); }
       if (withInv || !D.invT || Date.now() - D.invT > 10 * 60000) await fetchInv();
       save('data', D);
-      track();
+      track(); lateStats();
       msgErr && /API|key/i.test(msg) && (msg = '');
     } catch (e) { say('API: ' + e.message, true); }
     busy = false;
@@ -157,7 +157,7 @@
     const all = (load('gyms', null) || {}).g || {}, g = D && all[D.gym]; if (!g) return null;
     const order = [cfg.lastStat, 'speed', 'strength', 'dexterity', 'defense'].filter((k, i, a) => k && a.indexOf(k) === i);
     const best = Math.max(...order.map(k => g[k] || 0)); const stat = order.find(k => (g[k] || 0) === best);
-    return { name: g.n, stat, dots: best };
+    return { name: g.n, stat, dots: best, g };
   }
   // job + stars from the API (once a day). Company type names come from torn/companies.
   async function jobFromApi() {
@@ -203,13 +203,15 @@
   }
   // Vladar's gym formula (Torn Wiki), calibrated ×1.045
   const gainPer10 = (S0, H, dots) => (has('regime') ? 1.03 : 1) * 1.045 * dots * 10 * ((3.480061e-7 * Math.log(H + 250) + 3.091619e-6) * S0 + 6.827752e-5 * (H + 250) - 0.0301432);
-  function expGain(P) {
-    const G = gymNow(); if (!G) return 0;
-    let h = Math.min(HMAX, P.target * 2), sp = D && D.stats ? D.stats[G.stat] || 0 : 0, g = 0;
+  // gain if all gym energy goes into one stat – per stat; null = this gym can't train it
+  function expGainFor(P, stat, dots) {
+    if (!(dots > 0)) return null;
+    let h = Math.min(HMAX, P.target * 2), sp = D && D.stats ? D.stats[stat] || 0 : 0, g = 0;
     if (!sp) return 0;
-    for (let i = 0; i < Math.floor((P.totalE - P.conE) / 10); i++) { const x = gainPer10(sp, h, G.dots); g += x; sp += x; h = Math.max(0, h - (hasGoal() ? 2.5 : 5)); }
+    for (let i = 0; i < Math.floor((P.totalE - P.conE) / 10); i++) { const x = gainPer10(sp, h, dots); g += x; sp += x; h = Math.max(0, h - (hasGoal() ? 2.5 : 5)); }
     return g;
   }
+  function expGains(P) { const G = gymNow(); if (!G) return null; const o = {}; for (const k of Object.keys(STATS)) o[k] = expGainFor(P, k, G.g[k] || 0); return o; }
 
   /* =====================================================================
    *  PROGRESS – read from the API (energy, happy, cooldowns, points) + your ✓ clicks
@@ -241,9 +243,33 @@
     if (J.ok.ref && D.e < 10 && J.refE) J.ok.gym2 = true;
     if (J.ok.ref && D.e >= 10) J.refE = true;
     const all = P.steps.every(st => stepDone(st));
-    if (all && J.phase !== 'done') { J.phase = 'done'; J.end = { stats: Object.assign({}, D.stats), t: Date.now() }; const d = k => (J.end.stats[k] || 0) - ((J.start.stats || {})[k] || 0); const top = Object.keys(STATS).sort((a, b) => d(b) - d(a))[0]; if (d(top) > 0) { cfg.lastStat = top; saveCfg(); } ui.min = false; saveUi(); }
+    if (all && J.phase !== 'done') { J.phase = 'done'; J.end = { stats: Object.assign({}, D.stats), t: Date.now() }; const d = k => (J.end.stats[k] || 0) - ((J.start.stats || {})[k] || 0); const top = Object.keys(STATS).sort((a, b) => d(b) - d(a))[0]; if (d(top) > 0) { cfg.lastStat = top; saveCfg(); } ui.min = false; saveUi(); [3000, 15000, 45000].forEach(t => setTimeout(() => refresh(false), t)); }
     saveJ();
   }
+  // what the jump used – for the summary (Xanax stacked before the jump is counted from the start energy)
+  function usage() {
+    const P = plan(), u = [], L = J.loc || {}, U = J.used || {}, s0 = J.start || {};
+    const xan = L.xan || (s0.e > CAP - 250 ? Math.max(0, Math.round((s0.e - ((D && D.emax) || 150)) / 250)) : 0);
+    if (xan) u.push({ label: L.xan ? 'Xanax' : 'Xanax (stacked before)', n: xan, item: 'Xanax' });
+    if (U.candy) u.push({ label: CN(), n: U.candy, item: CN() });
+    const dv = (U.dvd || 0) + (U.fdvd || 0); if (dv) u.push({ label: 'Erotic DVD', n: dv, item: 'Erotic DVD' });
+    if (L.con) u.push({ label: `console Hardcore (${fmt(L.con * 5)}E)`, n: L.con, item: '' });
+    if (J.ok && J.ok.ecs) u.push({ label: 'Ecstasy', n: 1, item: 'Ecstasy' });
+    if (J.ok && J.ok.ref) u.push({ label: 'points (refill)', n: 30, item: 'points' });
+    const jpUsed = jobPlan().used.length ? J.jp : 0; if (jpUsed) u.push({ label: 'job points', n: jpUsed, item: '' });
+    return u;
+  }
+  // market prices for the summary – Torn API: torn/{ids}/items (market value) + points market
+  async function jumpPrices() {
+    if (!key || J.prices) return;
+    const names = usage().map(x => x.item).filter(x => x && x !== 'points'), ids = names.map(n => (D.ids && D.ids[n]) || KNOWN_IDS[n]).filter(Boolean), pr = {};
+    try {
+      if (ids.length) { const j = await api(`https://api.torn.com/v2/torn/${ids.join(',')}/items`); for (const it of j.items || []) { const v = (it.value && it.value.market_price) || it.market_value || 0; const n = names.find(n => ((D.ids && D.ids[n]) || KNOWN_IDS[n]) == it.id); if (n && v) pr[n] = +v; } }
+      if (usage().some(x => x.item === 'points')) { const m = await api('https://api.torn.com/market/?selections=pointsmarket'); const l = Object.values(m.pointsmarket || {}).map(x => +x.cost).filter(Boolean); if (l.length) pr.points = Math.min(...l); }
+    } catch (e) { }
+    J.prices = pr; saveJ(); render();
+  }
+  function lateStats() { if (J.phase === 'done' && J.end && D && D.stats && Date.now() - J.end.t < 120000) { J.end.stats = Object.assign({}, D.stats); saveJ(); } if (J.phase === 'done' && !J.prices) setTimeout(jumpPrices, 0); }
   function stepDone(st) {
     if (J.ok && J.ok[st.id]) return true;
     if (st.id === 'con') return !!(J.ok && J.ok.ecs) || (D && D.happy >= plan().target && J.phase === 'active');
@@ -289,7 +315,7 @@
     const w = waitFor(); if (w.s) return say(`Not ready – ${w.why} cooldown ${hm(w.s)} left.`, true);
     if (missing(plan()).length && !missWarned) { missWarned = true; return render(); }
     missWarned = false;
-    J = { phase: 'stacking', t0: Date.now(), jump: cfg.jump, used: {}, ok: {}, start: { e: D.e, happy: D.happy, booster: cdNow('booster'), drug: cdNow('drug'), stats: Object.assign({}, D.stats), points: D.points } };
+    J = { phase: 'stacking', t0: Date.now(), jump: cfg.jump, jp: cfg.jp, used: {}, ok: {}, start: { e: D.e, happy: D.happy, booster: cdNow('booster'), drug: cdNow('drug'), stats: Object.assign({}, D.stats), points: D.points } };
     if (D.e > CAP - 250) { J.ok.xan = true; say(`You already have ${fmt(D.e)} energy – one more Xanax would go over ${fmt(CAP)}, so Xanax is skipped.`); }
     else say('Jump started. Step 1: stack Xanax.');
     saveJ(); render();
@@ -327,14 +353,21 @@
     J.loc[st.id] = (J.loc[st.id] || 0) + 1; J.used[st.id] = Math.max(J.used[st.id] || 0, J.loc[st.id]);
     if (D && D.inv) D.inv[st.item] = Math.max(0, (D.inv[st.item] || 0) - (st.id === 'con' ? 0 : 1));
     if (st.id !== 'xan') { J.ok.xan = true; if (J.phase === 'stacking') J.phase = 'active'; }
-    if (st.id === 'ecs') { J.preEcs = D ? D.happy : 0; J.ok.ecs = true; J.ecsHappy = 0; }
+    const now = text.match(/You now have ([\d,]+)\s*\/\s*[\d,]+ happiness/i), gain = text.match(/You gain ([\d,]+) happiness/i), num = v => +String(v).replace(/,/g, '');
+    const before = D ? D.happy : 0;
+    if (D) { if (now) D.happy = num(now[1]); else if (gain) D.happy += num(gain[1]); }
+    if (st.id === 'ecs') { J.preEcs = before; J.ok.ecs = true; J.ecsHappy = (now || gain) && D ? D.happy : 0; }
     if (st.id === 'xan' && D) D.e = Math.min(CAP, D.e + 250);
     if (st.id === 'con' && D) D.e = Math.max(0, D.e - 5);
+    if (D) save('data', D);
     saveJ(); say(text || `${st.item} used.`);
     clearTimeout(refreshT); refreshT = setTimeout(() => refresh(false), st.id === 'candy' || st.id === 'con' ? 4000 : 1200);   // read energy/happy/cooldowns after a short pause
     render();
   }
+  let nowId = '', nowSince = 0;
   function markDone(id) {
+    if (id !== nowId || Date.now() - nowSince < 1500) { render(); return say('The green step just changed – press ✓ again if you meant it.', true); }
+    if (id === 'ecs' && !confirm('Mark Ecstasy as taken without using it from Jumpy?')) return;
     J.ok = J.ok || {}; J.ok[id] = true;
     if (id !== 'xan') { J.ok.xan = true; if (J.phase === 'stacking') J.phase = 'active'; }
     const P = plan(); for (const st of P.steps) { if (st.id === id) break; J.ok[st.id] = true; }
@@ -362,7 +395,7 @@
   #jpy.open{display:flex}
   #jpy header{display:flex;align-items:center;gap:6px;padding:7px 9px;border-bottom:1px solid #333;flex-wrap:wrap;background:#141414}
   #jpy header .ttl{font-size:15px;color:#fff;font-weight:bold}#jpy header .ver{color:#777;font-size:11px}#jpy .sp{flex:1}
-  #jpy header .ad{order:9;width:100%;color:#888;font-size:10px}#jpy header .ad a{color:#8ab4f8}
+  #jpy header .ad{color:#888;font-size:9px;line-height:1.2;max-width:150px}#jpy header .ad a{color:#8ab4f8}
   #jpy button,#jpy select,#jpy input{font:13px Arial,sans-serif;color:#eee;background:#2a2a2a;border:1px solid #555;border-radius:4px}
   #jpy button{padding:5px 9px;cursor:pointer;height:auto;line-height:1.3}#jpy button:hover{border-color:#999}
   #jpy select{padding:4px 6px}#jpy input[type=number],#jpy input[type=password]{padding:4px 6px;font-size:16px}
@@ -375,6 +408,7 @@
   #jpy .stats{display:grid;grid-template-columns:1fr 1fr;gap:6px;padding:8px 9px}
   #jpy .st{background:#222;border:1px solid #333;border-radius:4px;padding:6px 8px;min-width:0}
   #jpy .st .k{font-size:11px;color:#999}#jpy .st .n{font-size:18px;font-weight:bold;color:#fff;white-space:nowrap}#jpy .st .n small{font-size:12px;color:#999;font-weight:normal}
+  #jpy .eg{display:grid;grid-template-columns:1fr 1fr;gap:0 8px;font-size:13px;font-weight:bold;color:#f1c232;margin-top:2px}#jpy .eg small{color:#999;font-weight:normal;font-size:10px;margin-right:2px}
   #jpy .hp{grid-column:1/-1}#jpy .meter{height:9px;background:#333;border-radius:5px;overflow:hidden;margin-top:4px}#jpy .meter i{display:block;height:100%;background:#f1c232}
   #jpy .cd{grid-column:1/-1;display:flex;gap:6px}#jpy .cd .st{flex:1}#jpy .cd .n{font-size:15px}#jpy .cd .n small{display:block;font-size:10px;white-space:normal}
   #jpy .tick{float:right;font-size:12px;font-weight:bold}#jpy .tick.ok{color:#93c47d}#jpy .tick.hot{color:#e06666}
@@ -439,9 +473,10 @@
     if (!ui.open) return;
     const P = plan(), idle = J.phase === 'idle', running = J.phase === 'stacking' || J.phase === 'active', done = J.phase === 'done';
     const firstOpen = idle ? -2 : P.steps.findIndex(st => !stepDone(st));
+    { const nid = firstOpen >= 0 ? P.steps[firstOpen].id : ''; if (nid !== nowId) { nowId = nid; nowSince = Date.now(); } }
     const W = waitFor(), sp = specials();
     let h = `<header><span class="ttl">😊 Jumpy</span><span class="ver">v${VERSION}</span>
-      <span class="ad">Like the script? Send a Xanax to <a href="https://www.torn.com/profiles.php?XID=4422625" target="_blank">Toppzy [4422625]</a></span><span class="sp"></span>
+      <span class="ad">Like it? Send a Xanax to <a href="https://www.torn.com/profiles.php?XID=4422625" target="_blank">Toppzy</a></span><span class="sp"></span>
       ${key ? `<button data-a="ref" title="Read energy, happy and cooldowns now">⟳</button>` : ''}<button data-a="set" class="${setOpen ? 'on' : ''}" title="Settings">⚙️</button><button data-a="min" title="Minimize">${ui.min ? '▢' : '▁'}</button></header>`;
     // compact strip (gym page)
     const cur = idle || done ? null : P.steps[firstOpen];
@@ -466,10 +501,10 @@
     const pct = D ? Math.min(100, J.ok && J.ok.ecs ? 100 : D.happy / Math.max(1, P.target) * 100) : 0, hot = D && D.happy > (D.hmax || 0) && toTick() < 180;
     const nj = running ? `<div class="n" style="color:#f1c232">In progress<small>${J.phase === 'stacking' ? 'stacking Xanax' : 'jump running'}</small></div>`
       : W.s ? `<div class="n" style="color:#e06666">${hm(W.s)}<small>waiting for ${W.why} cooldown</small></div>` : `<div class="n" style="color:#93c47d">${key ? 'Ready now' : '–'}<small>${cfg.jump === 'console' ? 'drug cooldown is 0' : 'drug + booster at 0'}</small></div>`;
-    const g = expGain(P);
+    const EG = expGains(P), AB = { strength: 'STR', defense: 'DEF', speed: 'SPD', dexterity: 'DEX' };
     h += `<div class="stats">
       <div class="st"><div class="k">Energy</div><div class="n">${fmt(E())} <small>/ ${fmt(D ? D.emax : 0)}</small></div></div>
-      <div class="st"><div class="k">Expected gain</div><div class="n" style="color:#f1c232">${g ? '+' + fmt(g) : '–'} <small>${gymNow() ? STATS[gymNow().stat] : ''}</small></div>${gymNow() ? `<div class="k">${esc(gymNow().name)} · ${gymNow().dots} dots</div>` : ''}</div>
+      <div class="st"><div class="k" title="If all gym energy in this jump goes into that one stat">Expected gain${gymNow() ? ` · ${esc(gymNow().name)}` : ''}</div>${EG ? `<div class="eg">${Object.keys(AB).map(k => `<span><small>${AB[k]}</small> ${EG[k] == null ? '–' : EG[k] ? '+' + fmt(EG[k]) : '…'}</span>`).join('')}</div>` : '<div class="n">–</div>'}</div>
       <div class="st hp"><div class="k">Happy ${J.ok && J.ok.ecs ? '(Ecstasy taken)' : '→ target before Ecstasy'}<span class="tick ${hot ? 'hot' : 'ok'}" id="jpy-tick" title="Happy above your max drops back at the next quarter-hour tick">⏱ ${mmss(toTick())} to tick</span></div>
         <div class="n">${fmt(D ? D.happy : 0)} <small>${J.ok && J.ok.ecs ? '' : '/ ' + fmt(P.target)}</small></div><div class="meter"><i style="width:${pct}%"></i></div></div>
       <div class="cd"><div class="st"><div class="k">Drug cooldown</div><div class="n" style="color:${cdNow('drug') ? '#e06666' : '#93c47d'}">${hm(cdNow('drug'))}</div></div>
@@ -486,7 +521,10 @@
       const total = gained.reduce((t, k) => t + s1[k] - s0[k], 0);
       h += `<div class="sum" role="status"><h3>✓ Jump complete</h3><div class="big">${total > 0 ? '+' + fmt(total) : '…'} ${gained.length === 1 ? STATS[gained[0]] : 'stats'}</div>
         <dl>${gained.map(k => `<dt>${STATS[k]}</dt><dd>${fmt(s0[k])} → ${fmt(s1[k])} (+${fmt(s1[k] - s0[k])})</dd>`).join('')}
-        <dt>Happy</dt><dd>${fmt(J.preEcs)} → ${fmt(J.ecsHappy)} with Ecstasy</dd>
+        ${(() => { const u = usage(), pr = J.prices || {}; let cost = 0, known = true;
+          for (const x of u) { const p = x.item === 'points' ? pr.points : pr[x.item]; if (p) cost += p * x.n * (x.item === 'points' ? 1 : 1); else if (x.item) known = false; }
+          return `<dt>Used</dt><dd>${u.map(x => `${fmt(x.n)} ${esc(x.label)}`).join(' · ') || '–'}</dd>
+          <dt>Cost</dt><dd>${cost ? `≈ $${fmt(cost)}${total > 0 ? ` · $${fmt(cost / total)} per stat` : ''}${known ? '' : ' (some prices missing)'}` : (J.prices ? '–' : 'reading prices …')}</dd>`; })()}
         <dt>Next jump</dt><dd>${W.s ? `in ${hm(W.s)} (${W.why} cooldown)` : 'ready now'}</dd></dl>
         <button class="act go" data-a="close" style="margin-top:7px">✓ Close – back to waiting</button></div>`;
     }
@@ -526,7 +564,7 @@
         <tr><th>Data Sharing</th><td>Nobody. Nothing is sent to any other site.</td></tr>
         <tr><th>Purpose of Use</th><td>Personal happy-jump helper: show energy, happy, drug and booster cooldowns, the next-jump countdown, items needed and your gain. Nothing happens by itself – every action is one click by you; item buttons use one item per click.</td></tr>
         <tr><th>Key Storage &amp; Sharing</th><td>Stored only in your browser and only sent to api.torn.com. Never shared.</td></tr>
-        <tr><th>Key Access Level</th><td><b>Limited</b> – used selections: user (bars, cooldowns, battlestats, profile, money, gym, jobpoints, inventory), company (profile – your job stars), torn (companies, gyms).</td></tr></table>` : ''}
+        <tr><th>Key Access Level</th><td><b>Limited</b> – used selections: user (bars, cooldowns, battlestats, profile, money, gym, jobpoints, inventory), company (profile – your job stars), torn (companies, gyms, items – market values for the cost), market (pointsmarket).</td></tr></table>` : ''}
       <hr><b>Jump setup</b> <span class="hint">(used every time)</span>
       <label>Xanax per jump ${sel('xan', [1, 2, 3, 4], cfg.xan)} <span class="hint">energy stops at 1,000 – Xanax is skipped if you already have more than 750</span></label>
       <label>Candy per jump ${sel('candy', [...new Set([24, 36, 48, maxCandy()])], cfg.candy)} <span class="hint">max ${maxCandy()} with your booster cooldown</span></label>

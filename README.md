@@ -73,5 +73,6 @@ Install: [jumpy.user.js](https://raw.githubusercontent.com/skur-commits/torn-scr
 - **Gym** – the panel shrinks to a strip with energy, happy and the next step (⚡ REFILL → Points).
 - **Item buttons (0.1.5):** one click uses one item – the same request Torn's own «Okay» sends on the Items page (like TornTools Quick items). Console is always Hardcore (5E). Works from any Torn page; Torn's answer is shown in the panel.
 - **Job points** are read from the API (Limited key).
+- **0.1.6:** Expected gain for all four stats in your active gym (– = the gym can't train it); the plan is locked when you press Start; ✓ only marks the step you saw; happy is read from Torn's answer after each item; *Jump complete* shows the stat gain, what was used and the cost (market values) per stat. Gym and refill buttons open Torn's pages – you choose there.
 
 Safety: nothing happens by itself – one click = one action (one item, or opening one Torn page). API key: Limited, stored only in your browser, only sent to api.torn.com (terms table in ⚙️ Settings).
