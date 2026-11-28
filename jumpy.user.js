@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Jumpy – Torn happy-jump helper
 // @namespace    jumpy.torn
-// @version      0.1.7
+// @version      0.1.8
 // @description  Jumpy guides you through a happy jump (Console, Candy or eDVD): plan, happy target before Ecstasy, quarter-hour tick warning, drug/booster cooldowns, next-jump countdown, items needed and the gain after. Item buttons use one item per click (the same request as Torn's own Okay button, like TornTools Quick items) – nothing happens by itself.
 // @author       Toppzy [4422625]
 // @match        https://www.torn.com/*
@@ -17,7 +17,7 @@
 (function () {
   'use strict';
   if (window.top !== window.self) return;
-  const VERSION = '0.1.7';
+  const VERSION = '0.1.8';
 
   /* =====================================================================
    *  STORAGE
@@ -115,7 +115,7 @@
     if (!key || busy) return;
     busy = true;
     try {
-      const u = await api('https://api.torn.com/user/?selections=bars,cooldowns,battlestats,profile,money,gym,jobpoints');
+      const u = await api('https://api.torn.com/user/?selections=bars,cooldowns,battlestats,profile,money,gym,jobpoints,personalstats');
       const prev = D || {};
       D = Object.assign({}, prev, {
         t: Date.now(),
@@ -123,7 +123,7 @@
         happy: val(u.happy && u.happy.current), hmax: val(u.happy && u.happy.maximum) || 0,
         drug: val(u.cooldowns && u.cooldowns.drug), booster: val(u.cooldowns && u.cooldowns.booster),
         stats: { strength: val(u.strength), defense: val(u.defense), speed: val(u.speed), dexterity: val(u.dexterity) },
-        jpApi: jobPointsOf(u), points: val(u.points), gym: +u.active_gym || 0, coId: (u.job && u.job.company_id) || 0, coType: (u.job && u.job.company_type) || 0
+        ps: psOf(u), jpApi: jobPointsOf(u), points: val(u.points), gym: +u.active_gym || 0, coId: (u.job && u.job.company_id) || 0, coType: (u.job && u.job.company_type) || 0
       });
       await jobFromApi(); await fetchGyms();
       if (D.jpApi != null && cfg.jp !== D.jpApi) { cfg.jp = D.jpApi; saveCfg(); }
@@ -135,6 +135,8 @@
     busy = false;
     render();
   }
+  // Torn's own counters (personalstats): Xanax / Ecstasy taken, candy eaten, boosters used, energy refills
+  function psOf(u) { const p = u.personalstats || {}, n = v => v == null ? null : +v; return { xan: n(p.xantaken), ecs: n(p.exttaken), candy: n(p.candyused), boost: n(p.boostersused), ref: n(p.refills) }; }
   // job points for your current company type (user/jobpoints)
   function jobPointsOf(u) { const c = u.jobpoints && u.jobpoints.companies, t = u.job && u.job.company_type; if (!c || !t || !c[t]) return null; const v = c[t].jobpoints ?? c[t].points; return v == null ? null : +v; }
   async function fetchInv() {
@@ -233,19 +235,27 @@
     J.used = J.used || {}; J.ok = J.ok || {};
     // Xanax: done when one more would push energy over 1,000 – or as soon as a later step has started
     if (D.e > CAP - 250) J.ok.xan = true;
+    // 0.1.8: Torn's counters since Start – also counts items used outside Jumpy (Items page, TornPDA, another browser)
+    const d = k => (D.ps && s0.ps && D.ps[k] != null && s0.ps[k] != null) ? Math.max(0, D.ps[k] - s0.ps[k]) : null;
+    J.loc = J.loc || {};
+    if (d('xan') != null) J.used.xan = Math.max(J.loc.xan || 0, d('xan'));
+    const stx = P.steps.find(x => x.id === 'xan'); if (stx && used('xan') >= stx.of) J.ok.xan = true;
+    if (d('ecs') >= 1 && !J.ok.ecs) { J.ok.ecs = true; if (!J.ecsHappy) J.ecsHappy = D.happy; }
+    if (d('ref') >= 1 && J.ok.ecs) J.ok.ref = true;
     // candy / eDVD: counted from the booster cooldown they add (30 min per candy, 6 h per eDVD, scaled by your job)
     const dB = Math.max(0, D.booster - Math.max(0, (s0.booster || 0) - Math.floor((D.t - J.t0) / 1000)));
     J.loc = J.loc || {};
-    if (P.t === 'edvd') J.used.dvd = Math.max(J.loc.dvd || 0, Math.round(dB / (21600 * f)));
+    if (P.t === 'edvd') J.used.dvd = Math.max(J.loc.dvd || 0, d('boost') != null ? d('boost') : Math.round(dB / (21600 * f)));
     else {
       const st = P.steps.find(x => x.id === 'candy'); const c = Math.round(dB / (1800 * f));
-      J.used.candy = Math.min(st.of, Math.max(J.loc.candy || 0, c));
+      J.used.candy = Math.min(st.of, Math.max(J.loc.candy || 0, d('candy') != null ? d('candy') : c));
       if (cfg.fin) J.used.fdvd = Math.max(J.loc.fdvd || 0, c > st.of ? Math.round((dB - st.of * 1800 * f) / (21600 * f)) : 0);
     }
     if (J.used.candy || J.used.dvd) { J.ok.xan = true; J.ok.perk = true; if (J.phase === 'stacking') J.phase = 'active'; }
     // Ecstasy: happy roughly doubles
     if (!J.ok.ecs && J.preEcs && D.happy >= J.preEcs * 1.7) { J.ok.ecs = true; J.ecsHappy = D.happy; }
     if (!J.ok.ecs) J.preEcs = D.happy;
+    if (J.ok.ecs) { for (const x of P.steps) { if (x.id === 'ecs') break; J.ok[x.id] = true; } if (J.nC == null) J.nC = J.used.candy || 0; }   // Ecstasy taken = everything before it is over
     if (J.ok.ecs && !J.ecsHappy && J.preEcs && D.happy >= J.preEcs * 1.5) J.ecsHappy = D.happy;
     if (J.ok.ecs && D.e < 10) J.ok.gym = true;
     if (J.ok.gym && !J.ok.ref && (D.points <= (J.ptsGym ?? D.points) - 30 || D.e >= (D.emax || 150) - 5)) J.ok.ref = true;
@@ -329,11 +339,19 @@
   function startJump() {
     if (!key) { setOpen = true; say('Add your API key first (⚙️ Settings).', true); return render(); }
     if (!D) { say('Reading your data from Torn …'); return refresh(true); }
-    const w = waitFor(); if (w.s) return say(`Not ready – ${w.why} cooldown ${hm(w.s)} left.`, true);
+    const stacked = D.e > (D.emax || 150);                    // Xanax already taken (here, on TornPDA or on the Items page)
+    const w = waitFor(); if (w.s && !stacked) return say(`Not ready – ${w.why} cooldown ${hm(w.s)} left.`, true);
     if (missing(plan()).length && !missWarned) { missWarned = true; return render(); }
     missWarned = false;
-    J = { phase: 'stacking', t0: Date.now(), jump: cfg.jump, jp: cfg.jp, used: {}, ok: {}, start: { e: D.e, happy: D.happy, booster: cdNow('booster'), drug: cdNow('drug'), stats: Object.assign({}, D.stats), points: D.points } };
+    J = { phase: 'stacking', t0: Date.now(), jump: cfg.jump, jp: cfg.jp, used: {}, ok: {}, start: { e: D.e, happy: D.happy, booster: cdNow('booster'), drug: cdNow('drug'), stats: Object.assign({}, D.stats), points: D.points, ps: Object.assign({}, D.ps || {}) } };
+    // a jump already going: count the Xanax in the stack (and candy already eaten) as done
+    const xanIn = stacked ? Math.min(cfg.xan, Math.round((D.e - (D.emax || 150)) / 250)) : 0;
+    if (xanIn && J.start.ps.xan != null) J.start.ps.xan -= xanIn;
+    if (xanIn) { J.loc = { xan: xanIn }; J.used.xan = xanIn; }
+    const candyIn = D.happy > (D.hmax || 0) && cdNow('booster') > 0 && cfg.jump !== 'edvd' ? Math.min(cfg.candy, Math.round(cdNow('booster') / (1800 * boostF()))) : 0;
+    if (candyIn) { if (J.start.ps.candy != null) J.start.ps.candy -= candyIn; J.start.booster = 0; J.loc = Object.assign(J.loc || {}, { candy: candyIn }); J.used.candy = candyIn; J.ok.xan = true; J.phase = 'active'; }
     if (D.e > CAP - 250) { J.ok.xan = true; say(`You already have ${fmt(D.e)} energy – one more Xanax would go over ${fmt(CAP)}, so Xanax is skipped.`); }
+    else if (xanIn || candyIn) say(`Jump picked up: ${xanIn ? `${xanIn} Xanax in your stack` : ''}${xanIn && candyIn ? ', ' : ''}${candyIn ? `${candyIn} candy already eaten` : ''}. Items you use outside Jumpy count too.`);
     else say('Jump started. Step 1: stack Xanax.');
     saveJ(); render();
   }
@@ -539,7 +557,7 @@
     if (idle) {
       const miss = missing(P);
       h += `<div class="startbar">${missWarned && miss.length ? `<div class="warnbox" style="margin:0" role="alert">⚠ <b>Missing in your inventory:</b> ${miss.map(([k, n, x]) => `${n - x} ${esc(k)}`).join(', ')}. The jump will stop at that step. Get them first, or start anyway.<br><button class="act warn" data-a="start" style="min-height:34px;margin-top:5px">Start anyway</button> <button data-a="nomiss">Cancel</button></div>`
-        : `<button class="act ${W.s || !key ? 'lock' : 'go'}" data-a="start">▶ START ${{ console: 'CONSOLE', candy: 'CANDY', edvd: 'eDVD' }[cfg.jump]} JUMP</button>`}
+        : `<button class="act ${(W.s && !(D && D.e > (D.emax || 150))) || !key ? 'lock' : 'go'}" data-a="start">▶ ${D && D.e > (D.emax || 150) ? 'CONTINUE' : 'START'} ${{ console: 'CONSOLE', candy: 'CANDY', edvd: 'eDVD' }[cfg.jump]} JUMP</button>`}
         ${W.s ? `<span class="hint">Ready in ${hm(W.s)} (${W.why} cooldown). The plan below is a preview.</span>` : ''}</div>`;
     }
     if (done) {
@@ -560,7 +578,7 @@
       const tw = now && !why ? tickWarn(P, st) : null;
       const cls = dn ? 'fin' : later ? 'lock' : atT || tw ? 'warn' : why ? 'lock' : st.nav ? 'nav' : 'go';
       let cnt = '';
-      if (st.id === 'xan') cnt = J.ok && J.ok.xan ? (J.start && J.start.e > CAP - 250 ? 'skipped – energy already high' : 'energy stacked') : `${fmt(E())} / ${fmt(P.stackE)} energy`;
+      if (st.id === 'xan') cnt = J.ok && J.ok.xan ? (J.start && J.start.e > CAP - 250 && !used('xan') ? 'skipped – energy already high' : `${used('xan')} taken · energy stacked`) : `${used('xan')} of ${st.of} · ${fmt(E())} / ${fmt(P.stackE)} energy`;
       else if (st.id === 'con') cnt = `happy ${fmt(D ? D.happy : 0)} / ${fmt(P.target)} · ~${st.of} uses`;
       else if (st.of > 1) cnt = `${used(st.id)} of ${st.of}`;
       else cnt = dn ? 'done' : '';
@@ -590,7 +608,7 @@
         <tr><th>Data Sharing</th><td>Nobody. Nothing is sent to any other site.</td></tr>
         <tr><th>Purpose of Use</th><td>Personal happy-jump helper: show energy, happy, drug and booster cooldowns, the next-jump countdown, items needed and your gain. Nothing happens by itself – every action is one click by you; item buttons use one item per click.</td></tr>
         <tr><th>Key Storage &amp; Sharing</th><td>Stored only in your browser and only sent to api.torn.com. Never shared.</td></tr>
-        <tr><th>Key Access Level</th><td><b>Limited</b> – used selections: user (bars, cooldowns, battlestats, profile, money, gym, jobpoints, inventory), company (profile – your job stars), torn (companies, gyms, items – market values for the cost), market (pointsmarket).</td></tr></table>` : ''}
+        <tr><th>Key Access Level</th><td><b>Limited</b> – used selections: user (bars, cooldowns, battlestats, profile, money, gym, jobpoints, personalstats, inventory), company (profile – your job stars), torn (companies, gyms, items – market values for the cost), market (pointsmarket).</td></tr></table>` : ''}
       <hr><b>Jump setup</b> <span class="hint">(used every time)</span>
       <label>Xanax per jump ${sel('xan', [1, 2, 3, 4], cfg.xan)} <span class="hint">energy stops at 1,000 – Xanax is skipped if you already have more than 750</span></label>
       <label>Candy per jump ${sel('candy', [...new Set([24, 36, 48, maxCandy()])], cfg.candy)} <span class="hint">max ${maxCandy()} with your booster cooldown</span></label>
