@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Jumpy – Torn happy-jump helper
 // @namespace    jumpy.torn
-// @version      0.1.8
+// @version      0.1.9
 // @description  Jumpy guides you through a happy jump (Console, Candy or eDVD): plan, happy target before Ecstasy, quarter-hour tick warning, drug/booster cooldowns, next-jump countdown, items needed and the gain after. Item buttons use one item per click (the same request as Torn's own Okay button, like TornTools Quick items) – nothing happens by itself.
 // @author       Toppzy [4422625]
 // @match        https://www.torn.com/*
@@ -17,7 +17,7 @@
 (function () {
   'use strict';
   if (window.top !== window.self) return;
-  const VERSION = '0.1.8';
+  const VERSION = '0.1.9';
 
   /* =====================================================================
    *  STORAGE
@@ -239,7 +239,9 @@
     const d = k => (D.ps && s0.ps && D.ps[k] != null && s0.ps[k] != null) ? Math.max(0, D.ps[k] - s0.ps[k]) : null;
     J.loc = J.loc || {};
     if (d('xan') != null) J.used.xan = Math.max(J.loc.xan || 0, d('xan'));
-    const stx = P.steps.find(x => x.id === 'xan'); if (stx && used('xan') >= stx.of) J.ok.xan = true;
+    const stx = P.steps.find(x => x.id === 'xan');
+    if (stx && J.phase === 'stacking' && D.e > (D.emax || 150)) J.used.xan = Math.max(J.used.xan || 0, Math.min(stx.of, Math.floor(D.e / 250)));   // the stack shows how many are in
+    if (stx && used('xan') >= stx.of) J.ok.xan = true;
     if (d('ecs') >= 1 && !J.ok.ecs) { J.ok.ecs = true; if (!J.ecsHappy) J.ecsHappy = D.happy; }
     if (d('ref') >= 1 && J.ok.ecs) J.ok.ref = true;
     // candy / eDVD: counted from the booster cooldown they add (30 min per candy, 6 h per eDVD, scaled by your job)
@@ -345,7 +347,7 @@
     missWarned = false;
     J = { phase: 'stacking', t0: Date.now(), jump: cfg.jump, jp: cfg.jp, used: {}, ok: {}, start: { e: D.e, happy: D.happy, booster: cdNow('booster'), drug: cdNow('drug'), stats: Object.assign({}, D.stats), points: D.points, ps: Object.assign({}, D.ps || {}) } };
     // a jump already going: count the Xanax in the stack (and candy already eaten) as done
-    const xanIn = stacked ? Math.min(cfg.xan, Math.round((D.e - (D.emax || 150)) / 250)) : 0;
+    const xanIn = stacked ? Math.min(cfg.xan, Math.floor(D.e / 250)) : 0;
     if (xanIn && J.start.ps.xan != null) J.start.ps.xan -= xanIn;
     if (xanIn) { J.loc = { xan: xanIn }; J.used.xan = xanIn; }
     const candyIn = D.happy > (D.hmax || 0) && cdNow('booster') > 0 && cfg.jump !== 'edvd' ? Math.min(cfg.candy, Math.round(cdNow('booster') / (1800 * boostF()))) : 0;
